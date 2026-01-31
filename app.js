@@ -2,7 +2,7 @@
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v19";
+const STORAGE_KEY = "bm_checklist_v20";
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
@@ -24,10 +24,11 @@ function uid(prefix="id"){
 }
 
 const APT_NUMS_12 = ["101","102","103","104","201","202","203","204","301","302","303","304"];
+const APT_NUMS_16 = ["101","102","103","104","105","106","107","108","201","202","203","204","205","206","207","208"];
 
 function seed(){
   const state = {
-    version: 19,
+    version: 20,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -48,7 +49,7 @@ function seed(){
     for(let b=1;b<=numBlocks;b++){
       const bid = "B"+b;
       const apartments = {};
-      const nums = (aptsPerBlock===12) ? APT_NUMS_12 : []; // (se você quiser 16 depois, a gente coloca)
+      const nums = (aptsPerBlock===12) ? APT_NUMS_12 : (aptsPerBlock===16 ? APT_NUMS_16 : APT_NUMS_12); // (se você quiser 16 depois, a gente coloca)
       nums.forEach(n=>{
         apartments[n] = { num:n, pendencias: [] };
       });
@@ -116,6 +117,14 @@ function canMarkDone(u){
 function canReview(u){
   return u.role==="supervisor";
 }
+
+function canManageObras(u){
+  return ["qualidade","supervisor"].includes(u.role);
+}
+function canDeleteObra(u){
+  return u.role==="supervisor";
+}
+
 function canReopen(u){
   return ["qualidade","supervisor"].includes(u.role);
 }
@@ -377,6 +386,7 @@ function renderHome(root){
           </div>
           <div class="row" style="gap:8px">
             <button id="btnDash" class="btn">Visão Geral</button>
+            ${canManageObras(u) ? `<button id="btnAddObra" class="btn btn--orange">+ Adicionar obra</button>` : ``}
             <button id="btnReset2" class="btn btn--ghost">Zerar dados</button>
           </div>
         </div>
@@ -400,7 +410,7 @@ function renderHome(root){
                   <td style="text-align:center"><b>${s.conclu}</b></td>
                   <td style="text-align:center"><b>${s.aguard}</b></td>
                   <td style="text-align:center"><b>${s.pend}</b></td>
-                  <td style="text-align:right"><button class="btn" data-open="${esc(o.id)}">Abrir</button></td>
+                  <td style="text-align:right"><button class="btn" data-open="${esc(o.id)}">Abrir</button> ${canDeleteObra(u) ? `<button class="btn btn--red" data-del="${esc(o.id)}">Apagar</button>` : ``}</td>
                 </tr>
               `;
             }).join("")}
@@ -428,6 +438,76 @@ function renderHome(root){
   `;
 
   $("#btnDash").onclick = ()=> goto("dash");
+  const addBtn = $("#btnAddObra");
+  if(addBtn){
+    addBtn.onclick = ()=>{
+      const u = currentUser();
+      if(!canManageObras(u)) return toast("Sem permissão.");
+      const { backdrop, close } = openModal(`
+        <div class="modal">
+          <div class="row">
+            <div>
+              <div class="h2">Adicionar obra</div>
+              <div class="small">Somente Qualidade e Supervisor</div>
+            </div>
+            <button class="btn btn--ghost" id="mClose">✕</button>
+          </div>
+          <div class="hr"></div>
+          <div class="grid">
+            <div>
+              <div class="small">Nome da obra</div>
+              <input id="mObraName" class="input" placeholder="Ex.: Paraty - Entregas" />
+            </div>
+            <div class="grid" style="grid-template-columns:1fr 1fr; gap:10px">
+              <div>
+                <div class="small">Blocos</div>
+                <input id="mBlocks" class="input" inputmode="numeric" placeholder="Ex.: 10" />
+              </div>
+              <div>
+                <div class="small">Apto por bloco</div>
+                <select id="mApts" class="input">
+                  <option value="12">12</option>
+                  <option value="16">16</option>
+                </select>
+              </div>
+            </div>
+            <div class="row" style="justify-content:flex-end">
+              <button id="mAddObra" class="btn btn--orange">Adicionar</button>
+            </div>
+          </div>
+        </div>
+      `);
+      $("#mClose", backdrop).onclick = close;
+      $("#mAddObra", backdrop).onclick = ()=>{
+        const name = ($("#mObraName", backdrop).value||"").trim();
+        const blocks = Number(($("#mBlocks", backdrop).value||"").trim());
+        const apts = Number($("#mApts", backdrop).value);
+        if(!name){ toast("Informe o nome."); return; }
+        if(!blocks || blocks<1 || blocks>60){ toast("Blocos inválido."); return; }
+        const id = name.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"");
+        const r = addObra(id, name, blocks, apts);
+        if(!r.ok){ toast(r.msg); return; }
+        close();
+        toast("Obra adicionada!");
+        goto("home");
+      };
+    };
+  }
+
+  $$('button[data-del]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const u = currentUser();
+      if(!canDeleteObra(u)) return toast("Sem permissão.");
+      const obraId = btn.getAttribute("data-del");
+      const obra = state.obras[obraId];
+      const ok = confirm(`Apagar a obra "${obra?.name||obraId}"?\n\nIsso remove do app (irreversível no protótipo).`);
+      if(!ok) return;
+      deleteObra(obraId);
+      toast("Obra apagada.");
+      goto("home");
+    };
+  });
+
   $("#btnReset2").onclick = ()=>{
     state = seed();
     saveState();
@@ -785,6 +865,51 @@ function openAddPendencia(obraId, blockId, apto){
     toast("Pendência adicionada.");
     render();
   };
+}
+
+
+function openModal(html){
+  const backdrop = document.createElement("div");
+  backdrop.className = "modalBackdrop";
+  backdrop.innerHTML = html;
+  document.body.appendChild(backdrop);
+  const close = ()=> backdrop.remove();
+  backdrop.addEventListener("click",(e)=>{ if(e.target===backdrop) close(); });
+  return { backdrop, close };
+}
+
+function addObra(id, name, numBlocks, aptsPerBlock){
+  id = String(id||"").trim().toLowerCase().replace(/\s+/g,"_");
+  if(!id) return { ok:false, msg:"ID inválido" };
+  if(state.obras[id]) return { ok:false, msg:"Já existe uma obra com esse ID" };
+
+  // cria obra
+  const blocks = {};
+  for(let b=1;b<=Number(numBlocks);b++){
+    const bid="B"+b;
+    const apartments={};
+    const nums = (Number(aptsPerBlock)===16) ? APT_NUMS_16 : APT_NUMS_12;
+    nums.forEach(n=>apartments[n]={ num:n, pendencias:[] });
+    blocks[bid]={ id:bid, apartments };
+  }
+  const obra={ id, name, config:{ numBlocks:Number(numBlocks), aptsPerBlock:Number(aptsPerBlock) }, blocks };
+  state.obras[id]=obra;
+  state.obras_index.push({ id, name, config: obra.config });
+  saveState();
+  return { ok:true, msg:"Obra adicionada!" };
+}
+
+function deleteObra(obraId){
+  delete state.obras[obraId];
+  state.obras_index = state.obras_index.filter(o=>o.id!==obraId);
+  // remove usuários de execução vinculados exclusivamente a essa obra (opcional: manter)
+  state.users = state.users.map(u=>{
+    if(u.role==="execucao" && (u.obraIds||[]).includes(obraId)){
+      return { ...u, active:false };
+    }
+    return u;
+  });
+  saveState();
 }
 
 // boot
