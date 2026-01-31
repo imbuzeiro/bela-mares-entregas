@@ -2,7 +2,7 @@
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v27_localcache";
+const STORAGE_KEY = "bm_checklist_v28_localcache";
 
 // ===== Firebase (Realtime) =====
 const FIREBASE_CONFIG = {
@@ -93,6 +93,15 @@ function toast(msg){
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>{ el.style.display="none"; }, 2400);
 }
+
+function blockNum(id){
+  const m = String(id||"").match(/(\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+function sortBlocks(a,b){
+  return blockNum(a)-blockNum(b);
+}
+
 function esc(s){ return String(s||"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
 
 
@@ -136,6 +145,31 @@ function readImageAsDataURL(file){
   });
 }
 
+async function compressImage(file, maxSize=1280, quality=0.78){
+  const blobUrl = URL.createObjectURL(file);
+  try{
+    const img = await new Promise((res, rej)=>{
+      const im = new Image();
+      im.onload = ()=>res(im);
+      im.onerror = rej;
+      im.src = blobUrl;
+    });
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    const scale = Math.min(1, maxSize / Math.max(w,h));
+    const cw = Math.max(1, Math.round(w*scale));
+    const ch = Math.max(1, Math.round(h*scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw; canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, cw, ch);
+    return canvas.toDataURL("image/jpeg", quality);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+
 function uid(prefix="id"){
   return prefix + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
 }
@@ -145,7 +179,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 27,
+    version: 28,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -836,9 +870,9 @@ function renderApto(root){
         </div>
 
         <div class="hr"></div>
-        ${(apt.photos && apt.photos.length) ? `<div class="small"><b>Fotos do apartamento</b></div>
+        ${(apt.photos && apt.photos.length) ? `<div class="small"><b>Anexos do apartamento</b> <span class="small">(${(apt.photos||[]).length})</span></div>
         <div class="thumbs" id="aptThumbs">
-          ${apt.photos.map(ph=>`<img class="thumb" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
+          ${(apt.photos||[]).length ? (apt.photos||[]).map(ph=>`<img class="thumb" src="${esc(ph.dataUrl)}" alt="foto" />`).join("") : `<div class="small" style="opacity:.8">Nenhuma foto adicionada.</div>`}
         </div>
         <div class="hr"></div>` : ``}
 
@@ -870,9 +904,9 @@ function renderApto(root){
       input.type="file"; input.accept="image/*"; input.capture="environment";
       input.onchange = async ()=>{
         const file = input.files && input.files[0]; if(!file) return;
-        if(file.size > 1_500_000){ toast("Foto muito pesada. Tente uma menor."); return; }
         try{
-          const dataUrl = await readImageAsDataURL(file);
+          const dataUrl = await compressImage(file);
+          if(dataUrl.length > 2_000_000){ toast("Foto ainda muito grande. Tente aproximar ou reduzir."); return; }
           apt.photos = apt.photos || [];
           apt.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name } });
           saveState();
@@ -1041,13 +1075,9 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
   input.onchange = async ()=>{
     const file = input.files && input.files[0];
     if(!file) return;
-    // basic size guard (~1.5MB)
-    if(file.size > 1_500_000){
-      toast("Foto muito pesada. Tente uma menor.");
-      return;
-    }
     try{
-      const dataUrl = await readImageAsDataURL(file);
+      const dataUrl = await compressImage(file);
+      if(dataUrl.length > 2_000_000){ toast("Foto ainda muito grande. Tente aproximar ou reduzir."); return; }
       const { p } = findPend(obraId, blockId, apto, pendId);
       if(!p) return;
       p.photos = p.photos || [];
@@ -1236,7 +1266,7 @@ function renderUsers(root){
                   <td class="small">${esc(x.role)}</td>
                   <td class="small">${esc(access)}</td>
                   <td style="text-align:right; white-space:nowrap">
-                    <button class="btn" data-pin="${esc(x.id)}">Alterar PIN</button>
+                    ${(u.role==="supervisor" || (u.role==="qualidade" && ["qualidade","execucao"].includes(x.role))) ? `<button class="btn" data-pin="${esc(x.id)}">Alterar PIN</button>` : `<span class="small">—</span>`}
                     ${u.role==="supervisor" && x.role!=="diretor" ? `<button class="btn btn--red" data-off="${esc(x.id)}">Desativar</button>` : ``}
                   </td>
                 </tr>
