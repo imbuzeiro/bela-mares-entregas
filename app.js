@@ -2,7 +2,7 @@
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v25";
+const STORAGE_KEY = "bm_checklist_v26";
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
@@ -69,7 +69,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 25,
+    version: 26,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -167,6 +167,10 @@ function canManageObras(u){
 function canManageUsers(u){
   return ["qualidade","supervisor"].includes(u.role);
 }
+
+function canResetData(u){
+  return u && u.role==="supervisor";
+}
 function canCreateSupervisor(u){
   return u.role==="supervisor";
 }
@@ -189,14 +193,17 @@ function goto(screen, params={}){
 function setTopbar(){
   const u = currentUser();
   const chip = $("#userChip");
+  const settingsBtn = $("#btnSettings");
   const logout = $("#btnLogout");
   const back = $("#btnBack");
 
   if(u){
     chip.style.display = "inline-flex";
+    settingsBtn.style.display = "inline-flex";
     chip.textContent = `${u.name} • ${u.role}`;
     logout.style.display = "inline-flex";
   }else{
+    settingsBtn.style.display = "none";
     chip.style.display = "none";
     logout.style.display = "none";
   }
@@ -215,6 +222,8 @@ function setTopbar(){
       toast("Você já está na tela inicial.");
     }
   };
+
+  settingsBtn.onclick = ()=>{ goto("settings"); };
 
   logout.onclick = ()=>{
     state.session = null;
@@ -269,6 +278,7 @@ function render(){
   if(nav.screen==="obra") return renderObra(root);
   if(nav.screen==="apto") return renderApto(root);
   if(nav.screen==="users") return renderUsers(root);
+  if(nav.screen==="settings") return renderSettings(root);
 
   // fallback
   nav.screen = "login";
@@ -294,7 +304,7 @@ function renderLogin(root){
           </div>
           <div class="row">
             <button id="btnLogin" class="btn btn--orange">Entrar</button>
-            <button id="btnReset" class="btn btn--ghost">Zerar dados</button>
+            
           </div>
           <div class="small">Dica: use os logins de teste (qualidade_01/2222, supervisor_01/3333, diretor/9999).</div>
         </div>
@@ -325,13 +335,6 @@ function renderLogin(root){
       </div>
     </div>
   `;
-
-  $("#btnReset").onclick = ()=>{
-    state = seed();
-    saveState();
-    toast("Dados zerados.");
-    render();
-  };
 
   $("#btnLogin").onclick = ()=>{
     const id = ($("#loginUser").value||"").trim();
@@ -441,7 +444,7 @@ function renderHome(root){
             <button id="btnDash" class="btn">Visão Geral</button>
             ${canManageObras(u) ? `<button id="btnAddObra" class="btn btn--orange">+ Adicionar obra</button>` : ``}
             <button id="btnUsers" class="btn">Usuários</button>
-            <button id="btnReset2" class="btn btn--ghost">Zerar dados</button>
+            
           </div>
         </div>
         <div class="hr"></div>
@@ -607,12 +610,6 @@ function renderHome(root){
 
   $("#btnUsers").onclick = ()=> goto("users");
 
-  $("#btnReset2").onclick = ()=>{
-    state = seed();
-    saveState();
-    toast("Dados zerados.");
-    goto("home");
-  };
   $$('button[data-open]').forEach(b=>{
     b.onclick=()=>goto("obra",{ obraId: b.getAttribute("data-open") });
   });
@@ -1275,6 +1272,78 @@ function renderUsers(root){
       saveState();
       toast("Supervisor criado.");
       goto("users");
+    };
+  }
+}
+
+
+function renderSettings(root){
+  const u = currentUser();
+  if(!u) return goto("login");
+
+  root.innerHTML = `
+    <div class="grid2">
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="h1">Configurações</div>
+            <div class="small">Versão do protótipo: <b>v26</b></div>
+          </div>
+          <div class="row" style="gap:8px">
+            <button id="btnBackSettings" class="btn">Voltar</button>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="small">
+          <b>Atenção:</b> este protótipo ainda salva dados localmente no navegador (um passo antes do modo “ao vivo”).
+        </div>
+
+        ${canResetData(u) ? `
+          <div class="hr"></div>
+          <div class="h2">Área do Supervisor</div>
+          <div class="small">Zerar apaga tudo deste dispositivo (obras, pendências, fotos e usuários). Use só em último caso.</div>
+          <div class="hr"></div>
+          <button id="btnResetAll" class="btn btn--red">Zerar tudo</button>
+        ` : `
+          <div class="hr"></div>
+          <div class="small">Sem ações administrativas para este perfil.</div>
+        `}
+      </div>
+
+      <div class="card">
+        <div class="h2">Segurança</div>
+        <div class="small">Regras aplicadas agora:</div>
+        <div class="hr"></div>
+        <div class="small">
+          • Botão “Zerar tudo” não aparece para qualidade/execução/visualização.<br>
+          • Para zerar, o Supervisor precisa confirmar e informar o próprio PIN.
+        </div>
+      </div>
+    </div>
+  `;
+
+  $("#btnBackSettings").onclick = ()=>{
+    const u2 = currentUser();
+    if(canViewOnly(u2)) goto("dash"); else goto("home");
+  };
+
+  const btn = $("#btnResetAll");
+  if(btn){
+    btn.onclick = ()=>{
+      const ok = confirm("ATENÇÃO: Isso apaga TUDO deste navegador/dispositivo. Deseja continuar?");
+      if(!ok) return;
+      const typed = prompt("Para confirmar, digite ZERAR TUDO:") || "";
+      if(typed.trim().toUpperCase()!=="ZERAR TUDO"){ toast("Cancelado."); return; }
+      const pin = prompt("Digite seu PIN de supervisor para confirmar:") || "";
+      const sup = currentUser();
+      if(!sup || sup.role!=="supervisor"){ toast("Sem permissão."); return; }
+      if(pin.trim() !== sup.pin){ toast("PIN incorreto."); return; }
+      state = seed();
+      saveState();
+      toast("Dados zerados.");
+      goto("login");
     };
   }
 }
