@@ -1,5 +1,5 @@
 // Simple service worker for offline caching (prototype)
-const CACHE = "cr-entregas-v17";
+const CACHE = "cr-entregas-v15";
 const ASSETS = [
   "./",
   "./index.html",
