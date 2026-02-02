@@ -1,100 +1,31 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Bela Mares Incorporações — Checklist</title>
-  <link rel="stylesheet" href="styles.css"/>
-  <meta name="theme-color" content="#0d0f12"/>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<header class="top">
-  <div class="brand">
-    <div class="logo"></div>
-    <div class="txt">
-      <div class="h1">Bela Mares Incorporações</div>
-      <div class="h2">Checklist de obra</div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand__name">Bela Mares Incorporações</div>
+      <div class="brand__sub">Checklist de obra</div>
     </div>
-  </div>
-  <div id="who" class="who"></div>
-</header>
-
-<main class="wrap">
-  <section id="login" class="card">
-    <h3>Entrar</h3>
-    <p class="muted">Versão estável (local). Sem Firebase e sem cache.</p>
-
-    <label>Usuário</label>
-    <input id="name" placeholder="Ex.: Luiz" autocomplete="off"/>
-
-    <label>Perfil</label>
-    <select id="role">
-      <option value="qualidade">Qualidade</option>
-      <option value="execucao">Execução</option>
-      <option value="supervisor">Supervisor</option>
-      <option value="coordenador">Coordenador (visual)</option>
-      <option value="engenheiro">Engenheiro (visual)</option>
-      <option value="diretor">Diretor (visual)</option>
-    </select>
-
-    <label>PIN</label>
-    <input id="pin" placeholder="••••" inputmode="numeric" autocomplete="off"/>
-
-    <div class="row">
-      <button id="btnEnter" class="btn primary">Entrar</button>
-      <button id="btnReset" class="btn danger">Zerar (apaga tudo)</button>
+    <div class="topbar__right">
+      <button id="btnBack" class="btn btn--ghost" style="display:none">← Voltar</button>
+      <div id="userChip" class="chip" style="display:none"></div>
+      <button id="btnSettings" class="btn btn--ghost" style="display:none">⚙︎</button>
+      <button id="btnLogout" class="btn btn--ghost" style="display:none">Sair</button>
     </div>
-    <div id="msg" class="msg"></div>
-  </section>
+  </header>
 
-  <section id="obras" class="card" style="display:none">
-    <div class="row space">
-      <h3>Obras</h3>
-      <button id="btnAddObra" class="btn">Adicionar obra</button>
-      <button id="btnLogout" class="btn ghost">Sair</button>
-    </div>
-    <div id="obraList" class="list"></div>
-  </section>
+  <main id="app" class="app">
+    <!-- rendered by app.js -->
+  </main>
 
-  <section id="obra" class="card" style="display:none">
-    <div class="row space">
-      <div>
-        <h3 id="obraTitle">Obra</h3>
-        <p id="obraMeta" class="muted"></p>
-      </div>
-      <div class="row">
-        <button id="btnBack" class="btn ghost">Voltar</button>
-        <button id="btnDelObra" class="btn danger" style="display:none">Excluir obra</button>
-      </div>
-    </div>
+  <div id="toast" class="toast" style="display:none"></div>
 
-    <div class="stats">
-      <div class="pill"><span class="k">Pendência</span> <span id="sPend" class="v">0</span></div>
-      <div class="pill"><span class="k">Aguardando</span> <span id="sAguard" class="v">0</span></div>
-      <div class="pill"><span class="k">Concluído</span> <span id="sOk" class="v">0</span></div>
-    </div>
-
-    <div id="blockGrid" class="grid"></div>
-  </section>
-
-  <section id="apto" class="card" style="display:none">
-    <div class="row space">
-      <div>
-        <h3 id="aptoTitle">Bloco - Apto</h3>
-        <p id="aptoStatus" class="muted"></p>
-      </div>
-      <button id="btnBackApto" class="btn ghost">Voltar</button>
-    </div>
-
-    <div class="row space">
-      <h4>Pendências</h4>
-      <button id="btnAddPend" class="btn">Adicionar</button>
-    </div>
-
-    <div id="pendList" class="list"></div>
-  </section>
-</main>
-
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
