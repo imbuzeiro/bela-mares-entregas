@@ -2,7 +2,7 @@
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v31_localcache";
+const STORAGE_KEY = "bm_checklist_v34_localcache";
 
 // ===== Firebase (Realtime) =====
 const FIREBASE_CONFIG = {
@@ -214,7 +214,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 31,
+    version: 34,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -459,16 +459,16 @@ function renderLogin(root){
     <div class="grid2">
       <div class="card">
         <div class="h1">Entrar</div>
-        <div class="small">Usuário + PIN</div>
+        <div class="small">v32</div>
         <div class="hr"></div>
         <div class="grid">
           <div>
             <div class="small">Usuário</div>
-            <input id="loginUser" class="input" placeholder="ex.: qualidade_01" autocomplete="username" />
+            <input id="loginUser" class="input" placeholder="Usuário" autocomplete="username" />
           </div>
           <div>
             <div class="small">PIN</div>
-            <input id="loginPin" class="input" placeholder="ex.: 2222" inputmode="numeric" autocomplete="current-password" />
+            <input id="loginPin" class="input" placeholder="PIN" inputmode="numeric" autocomplete="current-password" />
           </div>
           <div class="row">
             <button id="btnLogin" class="btn btn--orange">Entrar</button>
@@ -1075,6 +1075,7 @@ function renderPendencias(container, obraId, blockId, apto){
       const act = btn.getAttribute("data-act");
       const id = btn.getAttribute("data-id");
       if(act==="feito") return actFeito(obraId, blockId, apto, id);
+      if(act==="desfazer") return actDesfazerFeito(obraId, blockId, apto, id);
       if(act==="aprovar") return actAprovar(obraId, blockId, apto, id);
       if(act==="reprovar") return actReprovar(obraId, blockId, apto, id);
       if(act==="reabrir") return actReabrir(obraId, blockId, apto, id);
@@ -1092,6 +1093,29 @@ function findPend(obraId, blockId, apto, pendId){
   if(!p) return;
   if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
   return { apt, p };
+}
+
+
+function actDesfazerFeito(obraId, blockId, apto, pendId){
+  const u = currentUser();
+  if(!u || u.role!=="execucao"){ toast("Sem permissão."); return; }
+  const { p } = findPend(obraId, blockId, apto, pendId);
+  if(!p) return;
+  if(p.status!=="aberta"){ toast("Não é possível desfazer após vistoria do supervisor."); return; }
+  if(!p.doneAt){ toast("Nada para desfazer."); return; }
+  if(p.doneBy && p.doneBy.id && p.doneBy.id !== u.id){
+    toast("Apenas quem marcou como feito pode desfazer.");
+    return;
+  }
+  const ok = confirm("Desfazer marcação de FEITO?");
+  if(!ok) return;
+  const beforeDoneAt = p.doneAt;
+  p.doneAt = null;
+  p.doneBy = null;
+  logEvent(p, "feito_desfeito", u, { antes: beforeDoneAt });
+  saveState();
+  toast("Feito desfeito.");
+  render();
 }
 
 function actFeito(obraId, blockId, apto, pendId){
@@ -1280,7 +1304,7 @@ function openPhotoViewer(dataUrl, meta){
         </div>
       </div>
       <div class="hr"></div>
-      <img src="${esc(dataUrl)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
+      <img class="pvImg" src="${esc(dataUrl)}" alt="foto">
     </div>
   `);
   $("#mClose", backdrop).onclick = close;
@@ -1586,7 +1610,7 @@ function renderUsers(root){
   const addSup = $("#btnAddSup");
   if(addSup){
     addSup.onclick = ()=>{
-      const id = prompt("Usuário do novo Supervisor (ex.: supervisor_02)") || "";
+      const id = prompt("Usuário do novo Supervisor ( supervisor_02)") || "";
       const pin = prompt("PIN (4 dígitos) do novo Supervisor:") || "";
       const uid = id.trim();
       const p = pin.trim();
