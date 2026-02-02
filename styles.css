@@ -154,3 +154,40 @@ body{
   width:28px; height:28px; border-radius:999px;
   cursor:pointer;
 }
+
+/* V29: modal de foto (evita abrir gigante no PC) */
+.bm-modal{
+  position:fixed; inset:0;
+  background:rgba(0,0,0,.72);
+  display:flex; align-items:center; justify-content:center;
+  padding:18px;
+  z-index:9999;
+}
+.bm-modal .box{
+  max-width:min(960px, 92vw);
+  width:100%;
+  background:rgba(15,18,24,.92);
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:16px;
+  overflow:hidden;
+}
+.bm-modal .top{
+  display:flex; justify-content:space-between; align-items:center;
+  padding:10px 12px;
+  border-bottom:1px solid rgba(255,255,255,.10);
+}
+.bm-modal img{
+  display:block;
+  width:100%;
+  height:auto;
+  max-height:80vh;
+  object-fit:contain;
+  background:#000;
+}
+.bm-modal .close{
+  cursor:pointer;
+  padding:8px 10px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,.12);
+  background:rgba(0,0,0,.18);
+}

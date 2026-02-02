@@ -1,4 +1,4 @@
-const APP_VERSION = "classic-v27";
+const APP_VERSION = "classic-v29";
 
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
