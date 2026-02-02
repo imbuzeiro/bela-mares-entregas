@@ -1,4 +1,4 @@
-const APP_VERSION = "classic-v34";
+const APP_VERSION = "classic-v35";
 
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
@@ -59,6 +59,61 @@ function readImageAsDataURL(file){
     r.onerror=()=>reject(r.error||new Error("Falha ao ler imagem"));
     r.readAsDataURL(file);
   });
+}
+
+// V35: comprime imagem para caber no armazenamento local (iPhone/PC) e evitar erro de "pesada".
+async function readAndCompressImage(file, opts={}){
+  const maxW = opts.maxW || 1280;
+  const maxH = opts.maxH || 1280;
+  const targetBytes = opts.targetBytes || 380_000; // ~380KB
+  const dataUrl = await readImageAsDataURL(file);
+  // Se já for pequena, mantém.
+  try{
+    const approxBytes = Math.ceil((dataUrl.length * 3) / 4);
+    if(approxBytes <= targetBytes) return dataUrl;
+  }catch(e){}
+
+  return await new Promise((resolve, reject)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      let w = img.width, h = img.height;
+      const ratio = Math.min(maxW/w, maxH/h, 1);
+      w = Math.max(1, Math.round(w*ratio));
+      h = Math.max(1, Math.round(h*ratio));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+
+      // tenta qualidades decrescentes até bater o alvo
+      const qs = [0.82, 0.72, 0.62, 0.52, 0.42];
+      for(const q of qs){
+        const out = canvas.toDataURL('image/jpeg', q);
+        const bytes = Math.ceil((out.length * 3) / 4);
+        if(bytes <= targetBytes){
+          return resolve(out);
+        }
+      }
+      // se não couber, retorna a última versão (a menor)
+      resolve(canvas.toDataURL('image/jpeg', 0.42));
+    };
+    img.onerror = ()=> reject(new Error('Falha ao carregar imagem'));
+    img.src = dataUrl;
+  });
+}
+
+// V35: checagem de "dono" mais robusta (id ou nome+role)
+function isOwner(owner, u){
+  if(!owner || !u) return false;
+  if(owner.id && u.id && owner.id === u.id) return true;
+  const on = (owner.name||"").trim().toLowerCase();
+  const un = (u.name||"").trim().toLowerCase();
+  if(on && un && on === un){
+    const or = owner.role || "";
+    if(!or || or === u.role) return true;
+  }
+  return false;
 }
 
 function uid(prefix="id"){
@@ -183,39 +238,41 @@ function currentUser(){
   return state.users.find(u=>u.id===sid && u.active) || null;
 }
 
+// Permissões precisam ser à prova de null.
+// Quando o usuário não é encontrado (sessão/cached state), não pode quebrar o app.
 function canViewOnly(u){
-  return ["diretor","engenheiro","coordenador"].includes(u.role);
+  return !!(u && ["diretor","engenheiro","coordenador"].includes(u.role));
 }
 function canCreate(u){
-  return ["qualidade","supervisor"].includes(u.role);
+  return !!(u && ["qualidade","supervisor"].includes(u.role));
 }
 function canMarkDone(u){
-  return u.role==="execucao";
+  return !!(u && u.role==="execucao");
 }
 function canReview(u){
-  return u.role==="supervisor";
+  return !!(u && u.role==="supervisor");
 }
 
 function canManageObras(u){
-  return ["qualidade","supervisor"].includes(u.role);
+  return !!(u && ["qualidade","supervisor"].includes(u.role));
 }
 
 function canManageUsers(u){
-  return ["qualidade","supervisor"].includes(u.role);
+  return !!(u && ["qualidade","supervisor"].includes(u.role));
 }
 
 function canResetData(u){
   return u && u.role==="supervisor";
 }
 function canCreateSupervisor(u){
-  return u.role==="supervisor";
+  return !!(u && u.role==="supervisor");
 }
 function canDeleteObra(u){
-  return u.role==="supervisor";
+  return !!(u && u.role==="supervisor");
 }
 
 function canReopen(u){
-  return ["qualidade","supervisor"].includes(u.role);
+  return !!(u && ["qualidade","supervisor"].includes(u.role));
 }
 
 const nav = { screen:"login", params:{} };
@@ -824,9 +881,8 @@ function renderApto(root){
       input.type="file"; input.accept="image/*"; input.capture="environment";
       input.onchange = async ()=>{
         const file = input.files && input.files[0]; if(!file) return;
-        if(file.size > 1_500_000){ toast("Foto muito pesada. Tente uma menor."); return; }
         try{
-          const dataUrl = await readImageAsDataURL(file);
+          const dataUrl = await readAndCompressImage(file);
           apt.photos = apt.photos || [];
           apt.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name } });
           saveState();
@@ -1049,13 +1105,8 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
   input.onchange = async ()=>{
     const file = input.files && input.files[0];
     if(!file) return;
-    // basic size guard (~1.5MB)
-    if(file.size > 1_500_000){
-      toast("Foto muito pesada. Tente uma menor.");
-      return;
-    }
     try{
-      const dataUrl = await readImageAsDataURL(file);
+      const dataUrl = await readAndCompressImage(file);
       const { p } = findPend(obraId, blockId, apto, pendId);
       if(!p) return;
       p.photos = p.photos || [];
@@ -1072,12 +1123,14 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
     }
   };
   input.click();
+}
+
 function actEditPend(obraId, blockId, apto, pendId){
   const u = currentUser();
   if(!canCreate(u)){ toast("Sem permissão."); return; }
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
-  if(!(p.createdBy && u && p.createdBy.id===u.id)){ toast("Você só pode editar o que você criou."); return; }
+  if(!isOwner(p.createdBy, u)){ toast("Você só pode editar o que você criou."); return; }
   const title = prompt("Editar pendência:", p.title || "") || "";
   if(!title.trim()) return;
   const category = prompt("Categoria:", p.category || "") || "";
@@ -1098,7 +1151,7 @@ function actDeletePend(obraId, blockId, apto, pendId){
   const idx = (apt.pendencias||[]).findIndex(x=>x.id===pendId);
   if(idx<0) return;
   const p = apt.pendencias[idx];
-  if(!(p.createdBy && u && p.createdBy.id===u.id)){ toast("Você só pode apagar o que você criou."); return; }
+  if(!isOwner(p.createdBy, u)){ toast("Você só pode apagar o que você criou."); return; }
   if(!confirm("Apagar esta pendência?")) return;
   // log before removing
   pushEvent(p, "apagado", u);
@@ -1115,7 +1168,7 @@ function actDeletePhoto(obraId, blockId, apto, pendId, photoId){
   if(!p || !p.photos) return;
   const ph = p.photos.find(x=>x.id===photoId);
   if(!ph) return;
-  if(!(ph.addedBy && u && ph.addedBy.id===u.id)){ toast("Você só pode apagar a foto que você adicionou."); return; }
+  if(!isOwner(ph.addedBy, u)){ toast("Você só pode apagar a foto que você adicionou."); return; }
   if(!confirm("Apagar esta foto?")) return;
   p.photos = p.photos.filter(x=>x.id!==photoId);
   pushEvent(p, "foto_del", u);
