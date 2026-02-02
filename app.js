@@ -3,7 +3,7 @@ window.addEventListener("error",function(ev){try{var root=document.getElementByI
 /* Bela Mares — Checklist (v43) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v43_localcache";
+const STORAGE_KEY = "bm_checklist_v44_localcache";
 
 // ===== Firebase (Realtime) =====
 const FIREBASE_CONFIG = {
@@ -209,7 +209,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 43,
+    version: 44,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
