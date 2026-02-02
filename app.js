@@ -2,7 +2,7 @@
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v34_localcache";
+const STORAGE_KEY = "bm_checklist_v35_localcache";
 
 // ===== Firebase (Realtime) =====
 const FIREBASE_CONFIG = {
@@ -100,17 +100,11 @@ function blockNum(id){
 }
 function sortBlocks(a,b){
 
-function function getSortedBlockIds(obra){
-  if(!obra) return [];
-  let ids = [];
-  if(obra.blocks && typeof obra.blocks==="object" && !Array.isArray(obra.blocks)){
-    ids = Object.keys(obra.blocks).map(String);
-  }else if(Array.isArray(obra.blocks)){
-    ids = obra.blocks.map(String);
-  }else if(typeof obra.config?.numBlocks==="number"){
-    ids = Array.from({length:obra.config.numBlocks}, (_,i)=>String(i+1));
-  }
-  return ids.sort(sortBlocks);
+function getSortedBlockIds(obra){
+
+function aptNum(a){
+  const n = Number(String(a||"").replace(/\D/g,""));
+  return isNaN(n)?0:n;
 }
 function sortApts(a,b){ return aptNum(a)-aptNum(b); }
   if(!obra) return [];
@@ -214,7 +208,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 34,
+    version: 35,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -322,18 +316,13 @@ function canManageUsers(u){
 
 function canModifyPend(u, p){
   if(!u || !p) return false;
-  // Qualidade só mexe no que criou; Supervisor só no que criou
-  if(u.role==="qualidade" || u.role==="supervisor"){
-    return (p.createdBy && p.createdBy.id === u.id);
-  }
-  return false;
+  if(!(u.role==="qualidade" || u.role==="supervisor")) return false;
+  return (p.createdBy && p.createdBy.id === u.id);
 }
 function canModifyPhoto(u, ph){
   if(!u || !ph) return false;
-  if(u.role==="qualidade" || u.role==="supervisor"){
-    return (ph.addedBy && ph.addedBy.id === u.id);
-  }
-  return false;
+  if(!(u.role==="qualidade" || u.role==="supervisor")) return false;
+  return (ph.addedBy && ph.addedBy.id === u.id);
 }
 
 function canResetData(u){
@@ -459,22 +448,22 @@ function renderLogin(root){
     <div class="grid2">
       <div class="card">
         <div class="h1">Entrar</div>
-        <div class="small">v32</div>
+        <div class="small">Usuário + PIN</div>
         <div class="hr"></div>
         <div class="grid">
           <div>
             <div class="small">Usuário</div>
-            <input id="loginUser" class="input" placeholder="Usuário" autocomplete="username" />
+            <input id="loginUser" class="input" placeholder="ex.: qualidade_01" autocomplete="username" />
           </div>
           <div>
             <div class="small">PIN</div>
-            <input id="loginPin" class="input" placeholder="PIN" inputmode="numeric" autocomplete="current-password" />
+            <input id="loginPin" class="input" placeholder="ex.: 2222" inputmode="numeric" autocomplete="current-password" />
           </div>
           <div class="row">
             <button id="btnLogin" class="btn btn--orange">Entrar</button>
             
           </div>
-          
+          <div class="small">Dica: use os logins de teste (qualidade_01/2222, supervisor_01/3333, diretor/9999).</div>
         </div>
       </div>
 
@@ -819,7 +808,7 @@ function renderObra(root){
     return goto("login");
   }
 
-  const blocks = getSortedBlockIds(obra);
+  const blocks = Object.keys(obra.blocks);
 
   root.innerHTML = `
     <div class="card">
@@ -1101,18 +1090,17 @@ function actDesfazerFeito(obraId, blockId, apto, pendId){
   if(!u || u.role!=="execucao"){ toast("Sem permissão."); return; }
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
-  if(p.status!=="aberta"){ toast("Não é possível desfazer após vistoria do supervisor."); return; }
-  if(!p.doneAt){ toast("Nada para desfazer."); return; }
-  if(p.doneBy && p.doneBy.id && p.doneBy.id !== u.id){
-    toast("Apenas quem marcou como feito pode desfazer.");
-    return;
-  }
-  const ok = confirm("Desfazer marcação de FEITO?");
-  if(!ok) return;
-  const beforeDoneAt = p.doneAt;
+  if(p.state!=="feito"){ toast("Nada para desfazer."); return; }
+  // somente antes de conferência / reprovação
+  if(p.reviewedAt || p.state==="conferido" || p.state==="reprovado"){ toast("Não é possível desfazer após vistoria."); return; }
+  if(p.doneBy && p.doneBy.id && p.doneBy.id !== u.id){ toast("Apenas quem marcou como feito pode desfazer."); return; }
+  if(!confirm("Desfazer marcação de FEITO?")) return;
+
+  const before = p.doneAt;
+  p.state = "pendente";
   p.doneAt = null;
   p.doneBy = null;
-  logEvent(p, "feito_desfeito", u, { antes: beforeDoneAt });
+  logEvent(p, "feito_desfeito", u, { antes: before });
   saveState();
   toast("Feito desfeito.");
   render();
@@ -1123,7 +1111,6 @@ function actFeito(obraId, blockId, apto, pendId){
   if(!canMarkDone(u)){ toast("Sem permissão."); return; }
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
-  if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
   p.state = "feito";
   p.doneAt = new Date().toISOString();
   p.doneBy = { id:u.id, name:u.name, role:u.role };
@@ -1137,7 +1124,6 @@ function actAprovar(obraId, blockId, apto, pendId){
   if(!canReview(u)){ toast("Sem permissão."); return; }
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
-  if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
   p.state = "conferido";
   p.reviewedAt = new Date().toISOString();
   p.reviewedBy = { id:u.id, name:u.name, role:u.role };
@@ -1153,7 +1139,6 @@ function actReprovar(obraId, blockId, apto, pendId){
   const note = prompt("Motivo da reprovação (curto):") || "";
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
-  if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
   p.state = "reprovado";
   p.reviewedAt = new Date().toISOString();
   p.reviewedBy = { id:u.id, name:u.name, role:u.role };
@@ -1168,7 +1153,6 @@ function actReabrir(obraId, blockId, apto, pendId){
   if(!canReopen(u)){ toast("Sem permissão."); return; }
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
-  if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
   p.state = "pendente";
   p.reopenedAt = new Date().toISOString();
   saveState();
@@ -1221,9 +1205,11 @@ function deletePhotoByMeta(meta){
 
 function actEditPend(obraId, blockId, apto, pendId){
   const u = currentUser();
+  if(!canCreate(u)){ toast("Sem permissão."); return; }
   const { p } = findPend(obraId, blockId, apto, pendId);
   if(!p) return;
   if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
+
   const novo = prompt("Editar pendência:", p.texto || "") || "";
   if(!novo.trim()){ toast("Cancelado."); return; }
   const before = p.texto || "";
@@ -1236,6 +1222,7 @@ function actEditPend(obraId, blockId, apto, pendId){
 
 function actDeletePend(obraId, blockId, apto, pendId){
   const u = currentUser();
+  if(!canCreate(u)){ toast("Sem permissão."); return; }
   const obra = state.obras[obraId];
   const block = obra?.blocks?.[blockId];
   const apt = block?.apartments?.[apto];
@@ -1610,7 +1597,7 @@ function renderUsers(root){
   const addSup = $("#btnAddSup");
   if(addSup){
     addSup.onclick = ()=>{
-      const id = prompt("Usuário do novo Supervisor ( supervisor_02)") || "";
+      const id = prompt("Usuário do novo Supervisor (ex.: supervisor_02)") || "";
       const pin = prompt("PIN (4 dígitos) do novo Supervisor:") || "";
       const uid = id.trim();
       const p = pin.trim();
