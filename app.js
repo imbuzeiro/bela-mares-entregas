@@ -1,4 +1,4 @@
-const APP_VERSION = "classic-v29";
+const APP_VERSION = "classic-v31";
 
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
@@ -913,7 +913,13 @@ function renderPendencias(container, obraId, blockId, apto){
         ${(p.photos && p.photos.length) ? `<div class="hr" style="margin:10px 0"></div>
           <div class="small"><b>Fotos</b></div>
           <div class="thumbs">
-            ${p.photos.map(ph=>`<img class="thumb" data-ph="${esc(ph.id)}" data-pid="${esc(p.id)}" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
+            ${p.photos.map(ph=>{
+              const minePhoto = (ph.addedBy && u && ph.addedBy.id===u.id);
+              return `<span class="thumbWrap">
+                <img class="thumb" data-ph="${esc(ph.id)}" data-pid="${esc(p.id)}" src="${esc(ph.dataUrl)}" alt="foto" />
+                ${minePhoto ? `<button class="photoDel" title="Apagar foto" data-pend="${esc(p.id)}" data-phdel="${esc(ph.id)}">🗑</button>` : ``}
+              </span>`;
+            }).join("")}
           </div>` : ``}
 
 
@@ -1503,3 +1509,47 @@ function renderSettings(root){
     goto("login");
   }
 })();
+
+// V31: delegação de clique (iPhone/PC) para garantir Editar/Apagar/FotoDel
+document.addEventListener("click", function(e){
+  const t = e.target;
+  if(!t) return;
+
+  // apagar foto
+  if(t.classList && t.classList.contains("photoDel")){
+    e.preventDefault(); e.stopPropagation();
+    const pid = t.getAttribute("data-pend");
+    const phid = t.getAttribute("data-phdel");
+    // tenta pegar contexto atual
+    const obraId = state.route?.params?.obraId;
+    const blockId = state.route?.params?.blockId;
+    const apto = state.route?.params?.apto;
+    if(obraId && blockId && apto && pid && phid){
+      actDeletePhoto(obraId, blockId, apto, pid, phid);
+    }
+    return;
+  }
+
+  // ações de pendência (editar/apagar/feito/foto etc)
+  if(t.matches && t.matches("button[data-act]")){
+    e.preventDefault(); e.stopPropagation();
+    // ações já são tratadas nos binds por tela, mas aqui é fallback
+    try{
+      const act = t.getAttribute("data-act");
+      const id = t.getAttribute("data-id");
+      const obraId = state.route?.params?.obraId;
+      const blockId = state.route?.params?.blockId;
+      const apto = state.route?.params?.apto;
+      if(!obraId || !blockId || !apto || !id) return;
+      if(act==="edit") return actEditPend(obraId, blockId, apto, id);
+      if(act==="del") return actDeletePend(obraId, blockId, apto, id);
+      if(act==="foto") return actAddFotoPend(obraId, blockId, apto, id);
+      if(act==="feito") return actFeito(obraId, blockId, apto, id);
+      if(act==="aprovar") return actAprovar(obraId, blockId, apto, id);
+      if(act==="reprovar") return actReprovar(obraId, blockId, apto, id);
+      if(act==="reabrir") return actReabrir(obraId, blockId, apto, id);
+    }catch(err){
+      console.error(err);
+    }
+  }
+});
