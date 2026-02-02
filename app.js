@@ -1,8 +1,8 @@
 
-/* Bela Mares — Checklist (v19) */
+/* Bela Mares — Checklist (v37) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v35_localcache";
+const STORAGE_KEY = "bm_checklist_v37_localcache";
 
 // ===== Firebase (Realtime) =====
 const FIREBASE_CONFIG = {
@@ -208,7 +208,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 35,
+    version: 36,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -453,17 +453,17 @@ function renderLogin(root){
         <div class="grid">
           <div>
             <div class="small">Usuário</div>
-            <input id="loginUser" class="input" placeholder="ex.: qualidade_01" autocomplete="username" />
+            <input id="loginUser" class="input" placeholder="Usuário" autocomplete="username" />
           </div>
           <div>
             <div class="small">PIN</div>
-            <input id="loginPin" class="input" placeholder="ex.: 2222" inputmode="numeric" autocomplete="current-password" />
+            <input id="loginPin" class="input" placeholder="PIN" inputmode="numeric" autocomplete="current-password" />
           </div>
           <div class="row">
             <button id="btnLogin" class="btn btn--orange">Entrar</button>
             
           </div>
-          <div class="small">Dica: use os logins de teste (qualidade_01/2222, supervisor_01/3333, diretor/9999).</div>
+          
         </div>
       </div>
 
@@ -808,7 +808,7 @@ function renderObra(root){
     return goto("login");
   }
 
-  const blocks = Object.keys(obra.blocks);
+  const blocks = getSortedBlockIds(obra);
 
   root.innerHTML = `
     <div class="card">
@@ -1165,41 +1165,41 @@ function actReabrir(obraId, blockId, apto, pendId){
 function deletePhotoByMeta(meta){
   const u = currentUser();
   if(!(u && (u.role==="qualidade" || u.role==="supervisor"))) throw new Error("no perm");
-  const scope = meta.scope || meta["data-scope"] || meta["scope"];
-  const phId = meta.ph || meta["data-ph"];
-  const pendId = meta.pid || meta["data-pid"];
-  if(!phId) throw new Error("no photo id");
 
-  // need current obra/block/apt from nav if on apt screen
+  const scope = meta.scope;
+  const phId = meta.ph;
+  const pendId = meta.pid;
+
+  if(!scope || !phId) throw new Error("bad meta");
+
   const obraId = nav.params?.obraId;
   const blockId = nav.params?.blockId;
   const apto = nav.params?.apto;
-  const obra = state.obras[obraId];
-  if(!obra) throw new Error("no obra");
-  const block = obra.blocks[blockId];
-  if(!block) throw new Error("no block");
-  const apt = block.apartments[apto];
+
+  const obra = state.obras?.[obraId];
+  const block = obra?.blocks?.[blockId];
+  const apt = block?.apartments?.[apto];
   if(!apt) throw new Error("no apt");
 
   if(scope==="apt"){
     const ph = (apt.photos||[]).find(x=>x.id===phId);
     if(!ph || !canModifyPhoto(u, ph)) throw new Error("no perm");
-    apt.photos = (apt.photos||[]).filter(p=>p.id!==phId);
+    apt.photos = (apt.photos||[]).filter(x=>x.id!==phId);
     saveState();
     return;
   }
+
   if(scope==="pend"){
     const p = (apt.pendencias||[]).find(x=>x.id===pendId);
-  if(!p) return;
-  if(!canModifyPend(u,p)){ toast("Sem permissão."); return; }
     if(!p) throw new Error("no pend");
     const ph = (p.photos||[]).find(x=>x.id===phId);
     if(!ph || !canModifyPhoto(u, ph)) throw new Error("no perm");
-    p.photos = (p.photos||[]).filter(ph=>ph.id!==phId);
+    p.photos = (p.photos||[]).filter(x=>x.id!==phId);
     logEvent(p, "foto_apagada", u, { photoId: phId });
     saveState();
     return;
   }
+
   throw new Error("bad scope");
 }
 
