@@ -1,25 +1,8 @@
 
-/* Bela Mares — Checklist (v40) */
+/* Bela Mares — Checklist (v37) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
-const STORAGE_KEY = "bm_checklist_v40_localcache";
-
-
-// ===== Debug overlay (iPhone-safe) =====
-function showFatal(msg){
-  try{
-    const root = document.getElementById("app") || document.body;
-    root.innerHTML = `<div class="card"><div class="h2">Erro</div><div class="small">${esc(String(msg))}</div></div>`;
-  }catch(e){}
-}
-window.addEventListener("error", function(ev){
-  console.error(ev.error || ev.message);
-  showFatal((ev && (ev.message || (ev.error && ev.error.message))) || "Erro desconhecido");
-});
-window.addEventListener("unhandledrejection", function(ev){
-  console.error(ev.reason);
-  showFatal((ev && ev.reason && (ev.reason.message||String(ev.reason))) || "Promise rejeitada");
-});
+const STORAGE_KEY = "bm_checklist_v41_localcache";
 
 // ===== Firebase (Realtime) =====
 const FIREBASE_CONFIG = {
@@ -161,6 +144,90 @@ function fmtDT(iso){
     return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }catch(e){ return String(iso); }
 
+
+function canModifyPhoto(u, ph){
+  if(!u || !ph) return false;
+  if(!(u.role==="qualidade" || u.role==="supervisor")) return false;
+  return (ph.addedBy && ph.addedBy.id === u.id);
+}
+function deletePhotoByMeta(meta){
+  const u = currentUser();
+  if(!(u && (u.role==="qualidade" || u.role==="supervisor"))) throw new Error("no perm");
+  const scope = meta && (meta.scope || meta["data-scope"]);
+  const phId = meta && (meta.ph || meta["data-ph"]);
+  const pendId = meta && (meta.pid || meta["data-pid"]);
+  if(!scope || !phId) throw new Error("bad meta");
+
+  const obraId = nav.params && nav.params.obraId;
+  const blockId = nav.params && nav.params.blockId;
+  const apto = nav.params && nav.params.apto;
+
+  const obra = state.obras[obraId];
+  const block = obra && obra.blocks ? obra.blocks[blockId] : null;
+  const apt = block && block.apartments ? block.apartments[apto] : null;
+  if(!apt) throw new Error("no apt");
+
+  if(scope==="apt"){
+    const ph = (apt.photos||[]).find(x=>x.id===phId);
+    if(!ph || !canModifyPhoto(u, ph)) throw new Error("no perm");
+    apt.photos = (apt.photos||[]).filter(x=>x.id!==phId);
+    saveState(); return;
+  }
+  if(scope==="pend"){
+    const p = (apt.pendencias||[]).find(x=>x.id===pendId);
+    if(!p) throw new Error("no pend");
+    const ph = (p.photos||[]).find(x=>x.id===phId);
+    if(!ph || !canModifyPhoto(u, ph)) throw new Error("no perm");
+    p.photos = (p.photos||[]).filter(x=>x.id!==phId);
+    logEvent(p, "foto_apagada", u, { photoId: phId });
+    saveState(); return;
+  }
+  throw new Error("bad scope");
+}
+
+function openPhotoViewer(dataUrl, meta){
+  const backdrop = document.createElement("div");
+  backdrop.className = "pvBackdrop";
+  backdrop.innerHTML = `
+    <div class="pvCard card">
+      <div class="pvTop">
+        ${(function(){
+          const u=currentUser();
+          if(!meta) return "";
+          if(!(u && (u.role==="qualidade" || u.role==="supervisor"))) return "";
+          return `<button class="btn btn--red" id="mDel">Apagar</button>`;
+        })()}
+        <button class="btn btn--ghost" id="mClose">✕</button>
+      </div>
+      <div class="pvBody">
+        <img class="pvImg" src="${esc(dataUrl)}" alt="foto">
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  const close=()=>{ try{ backdrop.remove(); }catch(e){} };
+  backdrop.addEventListener("click", (e)=>{ if(e.target===backdrop) close(); });
+  const closeBtn = backdrop.querySelector("#mClose");
+  if(closeBtn) closeBtn.onclick = close;
+
+  const delBtn = backdrop.querySelector("#mDel");
+  if(delBtn){
+    delBtn.onclick = ()=> {
+      if(!confirm("Apagar esta foto?")) return;
+      try{
+        deletePhotoByMeta(meta);
+        toast("Foto apagada.");
+        close();
+        render();
+      }catch(e){
+        console.error(e);
+        toast("Não foi possível apagar.");
+      }
+    };
+  }
+}
+
+
 function logEvent(p, type, u, extra={}){
   p.events = p.events || [];
   p.events.push({
@@ -225,7 +292,7 @@ const APT_NUMS_16 = ["101","102","103","104","201","202","203","204","301","302"
 
 function seed(){
   const state = {
-    version: 40,
+    version: 41,
     session: null, // { userId }
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
@@ -595,7 +662,7 @@ function renderLogin(root){
   const addSup = $("#btnAddSup");
   if(addSup){
     addSup.onclick = ()=>{
-      const id = prompt("Usuário do novo Supervisor (ex.: supervisor_02)") || "";
+      const id = prompt("Usuário do novo Supervisor ( supervisor_02)") || "";
       const pin = prompt("PIN (4 dígitos) do novo Supervisor:") || "";
       const uid = id.trim();
       const p = pin.trim();
@@ -724,3 +791,22 @@ function renderSettings(root){
     goto("login");
   }
 })();
+function actDesfazerFeito(obraId, blockId, apto, pendId){
+  const u = currentUser();
+  if(!u || u.role!=="execucao"){ toast("Sem permissão."); return; }
+  const { p } = findPend(obraId, blockId, apto, pendId);
+  if(!p) return;
+  if(p.status!=="aberta"){ toast("Não é possível desfazer após vistoria."); return; }
+  if(!p.doneAt){ toast("Nada para desfazer."); return; }
+  if(p.doneBy && p.doneBy.id && p.doneBy.id !== u.id){ toast("Apenas quem marcou como feito pode desfazer."); return; }
+  if(!confirm("Desfazer marcação de FEITO?")) return;
+  const before = p.doneAt;
+  p.doneAt = null;
+  p.doneBy = null;
+  logEvent(p, "feito_desfeito", u, { antes: before });
+  saveState();
+  toast("Feito desfeito.");
+  render();
+}
+
+
