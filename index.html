@@ -15,17 +15,21 @@
     <div class="topbar__right">
       <button id="btnBack" class="btn btn--ghost" style="display:none">← Voltar</button>
       <div id="userChip" class="chip" style="display:none"></div>
-      <button id="btnSettings" class="btn btn--ghost" style="display:none">⚙︎</button>
+      <button id="btnSettings" class="btn btn--ghost" style="display:none">⚙</button>
       <button id="btnLogout" class="btn btn--ghost" style="display:none">Sair</button>
     </div>
   </header>
 
-  <main id="app" class="app">
-    <!-- rendered by app.js?v=34b -->
-  </main>
+  <main id="app" class="app"></main>
 
   <div id="toast" class="toast" style="display:none"></div>
 
-  <script src="app.js?v=34b"></script>
+  <!-- Firebase (compat) para funcionar com app.js sem build -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+
+  <!-- App -->
+  <script src="app.js?v=37fb"></script>
 </body>
 </html>

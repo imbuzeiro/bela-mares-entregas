@@ -159,7 +159,7 @@ function seed(){
   return state;
 }
 
-function loadState(){
+function loadStateLocal(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
     if(!raw) return seed();
@@ -171,11 +171,217 @@ function loadState(){
     return seed();
   }
 }
-let state = loadState();
+let state = loadStateLocal();
 
-function saveState(){
+function saveStateLocal(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
+
+// =======================
+// Firebase (Firestore + Storage) Sync
+// - Mantém o app funcionando offline (localStorage)
+// - Quando Firebase estiver carregado (GitHub Pages / Firebase Hosting), sincroniza o "state" em tempo real
+// =======================
+
+const FIREBASE_ENABLED = true;
+
+// Seu projeto (copiado do Firebase Console)
+const firebaseConfig = {
+  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
+  authDomain: "bela-mares-entregas.firebaseapp.com",
+  projectId: "bela-mares-entregas",
+  storageBucket: "bela-mares-entregas.firebasestorage.app",
+  messagingSenderId: "159475494264",
+  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
+};
+
+// Onde salvar o estado no Firestore:
+const FB_DOC_PATH = { col: "apps", doc: "bela_mares_checklist" };
+
+const fb = {
+  enabled: false,
+  app: null,
+  db: null,
+  storage: null,
+  docRef: null,
+  unsub: null,
+  suppress: false,
+  lastAppliedMs: 0,
+  lastWriteMs: 0,
+  writeT: null,
+};
+
+function firebaseReady(){
+  return typeof window !== "undefined" && window.firebase && typeof window.firebase.initializeApp === "function";
+}
+
+function initFirebase(){
+  if(!FIREBASE_ENABLED) return;
+  if(!firebaseReady()) return;
+  try{
+    if(window.firebase.apps && window.firebase.apps.length){
+      fb.app = window.firebase.apps[0];
+    }else{
+      fb.app = window.firebase.initializeApp(firebaseConfig);
+    }
+    fb.db = window.firebase.firestore();
+    fb.storage = window.firebase.storage();
+    fb.docRef = fb.db.collection(FB_DOC_PATH.col).doc(FB_DOC_PATH.doc);
+    fb.enabled = true;
+  }catch(err){
+    console.warn("Firebase init falhou:", err);
+    fb.enabled = false;
+  }
+}
+
+function applyRemoteState(remoteState, remoteUpdatedAtMs){
+  if(!remoteState) return;
+  if(remoteUpdatedAtMs && remoteUpdatedAtMs <= fb.lastAppliedMs) return;
+
+  fb.suppress = true;
+  state = remoteState;
+  // salva local também, para abrir offline
+  try{ saveStateLocal(); }catch(_){}
+  fb.lastAppliedMs = remoteUpdatedAtMs || Date.now();
+  fb.suppress = false;
+
+  // re-render na rota atual
+  try{
+    if(nav && nav.route){
+      goto(nav.route, nav.params || {}, { replace:true });
+    }else{
+      render();
+    }
+  }catch(e){
+    try{ render(); }catch(_){}
+  }
+}
+
+function startFirebaseSync(){
+  initFirebase();
+  if(!fb.enabled) return;
+
+  if(fb.unsub) try{ fb.unsub(); }catch(_){}
+  fb.unsub = fb.docRef.onSnapshot((snap)=>{
+    if(!snap.exists){
+      // seed inicial
+      scheduleRemoteWrite(true);
+      return;
+    }
+    const data = snap.data() || {};
+    const remoteState = data.state;
+    const remoteUpdatedAtMs = Number(data.updatedAtMs || 0);
+
+    // se o remoto estiver vazio, faz seed
+    if(!remoteState){
+      scheduleRemoteWrite(true);
+      return;
+    }
+    // evita loop: se foi a gente que acabou de escrever
+    if(remoteUpdatedAtMs && remoteUpdatedAtMs === fb.lastWriteMs) return;
+
+    applyRemoteState(remoteState, remoteUpdatedAtMs);
+  }, (err)=>{
+    console.warn("onSnapshot erro:", err);
+  });
+
+  // ao iniciar, tenta também puxar 1x
+  fb.docRef.get().then((snap)=>{
+    if(!snap.exists){
+      scheduleRemoteWrite(true);
+      return;
+    }
+    const data = snap.data() || {};
+    if(data.state){
+      applyRemoteState(data.state, Number(data.updatedAtMs || 0));
+    }else{
+      scheduleRemoteWrite(true);
+    }
+  }).catch((e)=>{
+    console.warn("Firebase get erro:", e);
+  });
+}
+
+function scheduleRemoteWrite(force){
+  if(!fb.enabled) return;
+  if(fb.suppress) return;
+  if(!force){
+    // debounce
+    clearTimeout(fb.writeT);
+    fb.writeT = setTimeout(()=>remoteWriteNow(), 400);
+  }else{
+    remoteWriteNow();
+  }
+}
+
+function remoteWriteNow(){
+  if(!fb.enabled) return;
+  if(fb.suppress) return;
+  fb.lastWriteMs = Date.now();
+  const payload = {
+    state: state,
+    updatedAtMs: fb.lastWriteMs,
+  };
+  fb.docRef.set(payload, { merge:true }).catch((e)=>{
+    console.warn("Firebase set erro:", e);
+  });
+}
+
+// Sobrescreve saveState: mantém local + envia pro Firestore (se ativo)
+function saveState(){
+  saveStateLocal();
+  scheduleRemoteWrite(false);
+}
+
+// ============ Fotos no Firebase Storage ============
+
+function hasFirebaseStorage(){
+  return fb.enabled && fb.storage && typeof fb.storage.ref === "function";
+}
+
+async function uploadPhotoDataUrlToStorage(dataUrl, meta){
+  // meta: {obraId, bloco, apto, pendId, userId}
+  if(!hasFirebaseStorage()) return null;
+  const safe = (s)=>String(s||"").replace(/[^a-zA-Z0-9_-]+/g,"_").slice(0,80);
+  const path = [
+    "photos",
+    safe(meta.obraId),
+    "bloco_"+safe(meta.bloco),
+    "apto_"+safe(meta.apto),
+    "pend_"+safe(meta.pendId),
+    Date.now()+"_"+safe(meta.userId)+".jpg"
+  ].join("/");
+
+  const ref = fb.storage.ref(path);
+  await ref.putString(dataUrl, "data_url");
+  const url = await ref.getDownloadURL();
+  return { url, path };
+}
+
+async function deleteStorageByPath(path){
+  if(!hasFirebaseStorage()) return;
+  if(!path) return;
+  try{
+    await fb.storage.ref(path).delete();
+  }catch(e){
+    // pode já ter sido apagado
+  }
+}
+
+function photoSrc(ph){ return ph && (ph.url || ph.dataUrl || ph.src || ""); }
+
+async function deleteStorageByUrl(url){
+  if(!hasFirebaseStorage()) return;
+  if(!url) return;
+  try{
+    const ref = fb.storage.refFromURL(url);
+    await ref.delete();
+  }catch(e){
+    // pode falhar se URL não for do storage, ou já apagado
+  }
+}
+
+
 
 
 function safeName(obj){
@@ -836,7 +1042,7 @@ function renderApto(root){
         <div class="hr"></div>
         ${(apt.photos && apt.photos.length) ? `<div class="small"><b>Fotos do apartamento</b></div>
         <div class="thumbs" id="aptThumbs">
-          ${apt.photos.map(ph=>`<img class="thumb" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
+          ${apt.photos.map(ph=>`<img class="thumb" src="${esc(photoSrc(ph))}" alt="foto" />`).join("")}
         </div>
         <div class="hr"></div>` : ``}
 
@@ -870,12 +1076,27 @@ function renderApto(root){
         const file = input.files && input.files[0]; if(!file) return;
         try{
           const dataUrl = await compressImageFileToDataURL(file,{maxDim:1600,maxBytes:1200000,quality:0.78});
+
+          const photoPayload = { id: uid("ph"), addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name } };
+
+          if(hasFirebaseStorage()){
+            const up = await uploadPhotoDataUrlToStorage(dataUrl, { obraId, bloco:blockId, apto, pendId:"apto", userId:u.id });
+            if(up && up.url){
+              photoPayload.url = up.url;
+              photoPayload.path = up.path;
+            }else{
+              photoPayload.dataUrl = dataUrl;
+            }
+          }else{
+            photoPayload.dataUrl = dataUrl;
+          }
+
           apt.photos = apt.photos || [];
-          apt.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name } });
+          apt.photos.push(photoPayload);
           saveState();
           toast("Foto do apto adicionada.");
           render();
-          openPhotoViewer(dataUrl);
+          openPhotoViewer(photoSrc(photoPayload));
         }catch(e){ console.error(e); toast("Falha ao adicionar foto."); }
       };
       input.click();
@@ -972,7 +1193,7 @@ function renderPendencias(container, obraId, blockId, apto){
         ${(p.photos && p.photos.length) ? `<div class="hr" style="margin:10px 0"></div>
           <div class="small"><b>Fotos</b></div>
           <div class="thumbs">
-            ${p.photos.map(ph=>`<img class="thumb" data-ph="${esc(ph.id)}" data-pid="${esc(p.id)}" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
+            ${p.photos.map(ph=>`<img class="thumb" data-ph="${esc(ph.id)}" data-pid="${esc(p.id)}" src="${esc(photoSrc(ph))}" alt="foto" />`).join("")}
           </div>` : ``}
 
 
@@ -1096,34 +1317,41 @@ function actReabrir(obraId, blockId, apto, pendId){
 }
 
 
-async function actAddFotoPend(obraId, blockId, apto, pendId){
+async function actAddFotoPend(obraId, blockId, apto, pendId, file){
   const u = currentUser();
   if(!canCreate(u)){ toast("Sem permissão."); return; }
-  // file picker
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "image/*";
-  input.capture = "environment";
-  input.onchange = async ()=>{
-    const file = input.files && input.files[0];
-    if(!file) return;    try{
-      const dataUrl = await compressImageFileToDataURL(file,{maxDim:1600,maxBytes:1200000,quality:0.78});
-      const { p } = findPend(obraId, blockId, apto, pendId);
-      if(!p) return;
-      p.photos = p.photos || [];
-      p.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name, role:u.role } });
-      pushEvent(p, "foto_add", u);
-      saveState();
-      toast("Foto adicionada.");
-      render();
-      // open viewer for last photo
-      openPhotoViewer(dataUrl);
-    }catch(e){
-      console.error(e);
-      toast("Falha ao adicionar foto.");
+  const { p } = findPend(obraId, blockId, apto, pendId);
+  if(!p) return;
+  p.photos = p.photos || [];
+  try{
+    const dataUrl = await compressImageFileToDataURL(file, 1400, 0.78);
+
+    // Se Firebase Storage estiver ativo, sobe a foto e salva só o link (recomendado)
+    let photoPayload = { id: uid("ph"), at: nowISO(), by: u.name, addedBy: { id:u.id, name:u.name, role:u.role } };
+
+    if(hasFirebaseStorage()){
+      const up = await uploadPhotoDataUrlToStorage(dataUrl, { obraId, bloco:blockId, apto, pendId, userId:u.id });
+      if(up && up.url){
+        photoPayload.url = up.url;
+        photoPayload.path = up.path;
+      }else{
+        // fallback
+        photoPayload.dataUrl = dataUrl;
+      }
+    }else{
+      // Sem firebase: guarda no próprio state (pode ficar pesado)
+      photoPayload.dataUrl = dataUrl;
     }
-  };
-  input.click();
+
+    p.photos.push(photoPayload);
+    pushEvent(p, "foto_add", u);
+    saveState();
+    toast("Foto adicionada.");
+    render();
+  }catch(err){
+    console.error(err);
+    toast("Falha ao processar foto.");
+  }
 }
 
 function actEditPend(obraId, blockId, apto, pendId){
@@ -1171,7 +1399,18 @@ function actDeletePhoto(obraId, blockId, apto, pendId, photoId){
   if(!ph) return;
   if(!(ph.addedBy && u && ph.addedBy.id===u.id)){ toast("Você só pode apagar a foto que você adicionou."); return; }
   if(!confirm("Apagar esta foto?")) return;
+
+  // remove do state
   p.photos = p.photos.filter(x=>x.id!==photoId);
+
+  // tenta apagar do Storage também (se existir)
+  (async ()=>{
+    try{
+      if(ph.path) await deleteStorageByPath(ph.path);
+      else if(ph.url) await deleteStorageByUrl(ph.url);
+    }catch(_){}
+  })();
+
   pushEvent(p, "foto_del", u);
   saveState();
   toast("Foto apagada.");
@@ -1545,6 +1784,8 @@ function renderSettings(root){
 
 // boot
 (function boot(){
+  // inicia sync com Firebase (se os scripts estiverem no index.html)
+  startFirebaseSync();
   // If session exists, route accordingly; else login.
   const u = currentUser();
   if(u){
@@ -1601,7 +1842,7 @@ document.addEventListener("click", function(e){
       const p = (apt.pendencias||[]).find(x=>x.id===pid);
       const photo = (p && p.photos ? p.photos.find(x=>x.id===phid) : null);
       const mine = !!(photo && u && photo.addedBy && photo.addedBy.id===u.id);
-      openPhotoViewer(photo ? photo.dataUrl : t.getAttribute("src"), {
+      openPhotoViewer(photo ? photoSrc(photo) : t.getAttribute("src"), {
         canDelete: mine && (u.role==="qualidade" || u.role==="supervisor"),
         onDelete: ()=> actDeletePhoto(obraId, blockId, apto, pid, phid)
       });
