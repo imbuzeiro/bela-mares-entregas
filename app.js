@@ -189,12 +189,21 @@ function ensureEvents(p){
   return p.events;
 }
 function pushEvent(p, type, u, extra){
+  const events = ensureEvents(p);
+  // Anti-duplicação: evita registrar o mesmo evento duas vezes por clique duplo
+  // (especialmente em celular) em um intervalo muito curto.
+  const nowIso = new Date().toISOString();
+  const last = events[events.length-1];
+  if(last && last.type===type && last.by && u && last.by.id===u.id){
+    const dt = Math.abs(new Date(nowIso).getTime() - new Date(last.at).getTime());
+    if(dt < 1500) return; // ignora duplicado
+  }
   const ev = Object.assign({
     type,
-    at: new Date().toISOString(),
+    at: nowIso,
     by: u ? { id:u.id, name:u.name, role:u.role } : null
   }, extra||{});
-  ensureEvents(p).push(ev);
+  events.push(ev);
 }
 function fmtEvent(ev){
   const who = ev.by ? (safeName(ev.by) + " (" + safeRole(ev.by) + ")") : "-";
@@ -930,16 +939,33 @@ function renderPendencias(container, obraId, blockId, apto){
           <b>Histórico</b><br>
           ${(()=>{
             const lines = [];
-            // compat (campos antigos)
-            if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
-            if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
-            if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
-            if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
-            // eventos acumulados
-            if(p.events && p.events.length){
-              p.events.forEach(ev=>lines.push(fmtEvent(ev)));
+            const hasEvents = !!(p.events && p.events.length);
+            const typeSet = new Set(hasEvents ? p.events.map(ev=>ev.type) : []);
+
+            // Compat (campos antigos): só mostra se não houver eventos equivalentes.
+            if(p.createdAt && (!hasEvents || !typeSet.has('criado')))
+              lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
+            if(p.doneAt && (!hasEvents || !typeSet.has('feito')))
+              lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
+            if(p.reviewedAt && (!hasEvents || !typeSet.has('aprovado')))
+              lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
+            if(p.reopenedAt && (!hasEvents || !typeSet.has('reaberto')))
+              lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
+
+            // Eventos acumulados (com deduplicação)
+            if(hasEvents){
+              const seen = new Set();
+              p.events.forEach(ev=>{
+                // Dedup visual: mesma ação + mesmo usuário no mesmo minuto
+                const byId = (ev.by && ev.by.id) || '';
+                const atMin = (ev.at || '').slice(0,16); // YYYY-MM-DDTHH:MM
+                const key = `${ev.type}|${byId}|${atMin}`;
+                if(seen.has(key)) return;
+                seen.add(key);
+                lines.push(fmtEvent(ev));
+              });
             }
-            // remove duplicados simples
+
             return lines.join("<br>");
           })()}
         </div>
