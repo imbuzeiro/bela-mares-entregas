@@ -196,7 +196,7 @@ function pushEvent(p, type, u, extra){
   const last = events[events.length-1];
   if(last && last.type===type && last.by && u && last.by.id===u.id){
     const dt = Math.abs(new Date(nowIso).getTime() - new Date(last.at).getTime());
-    if(dt < 1500) return; // ignora duplicado
+    if(dt < 5000) return; // ignora duplicado
   }
   const ev = Object.assign({
     type,
@@ -926,7 +926,6 @@ function renderPendencias(container, obraId, blockId, apto){
             const canEditMine = (canCreate(u) && mine);
             const btns = [];
             if(canEditMine){
-              btns.push(`<button class="btn btn--ghost" data-act="edit" data-id="${p.id}">Editar</button>`);
               btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
             }
             return btns.join("");
@@ -1003,7 +1002,6 @@ function renderPendencias(container, obraId, blockId, apto){
       if(act==="reprovar") return actReprovar(obraId, blockId, apto, id);
       if(act==="reabrir") return actReabrir(obraId, blockId, apto, id);
       if(act==="foto") return actAddFotoPend(obraId, blockId, apto, id);
-      if(act==="edit") return actEditPend(obraId, blockId, apto, id);
       if(act==="del") return actDeletePend(obraId, blockId, apto, id);
     };
   });
@@ -1126,6 +1124,8 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
     }
   };
   input.click();
+}
+
 function actEditPend(obraId, blockId, apto, pendId){
   const u = currentUser();
   if(!canCreate(u)){ toast("Sem permissão."); return; }
@@ -1176,9 +1176,6 @@ function actDeletePhoto(obraId, blockId, apto, pendId, photoId){
   saveState();
   toast("Foto apagada.");
   render();
-}
-
-
 }
 
 function openPhotoViewer(src, meta){
@@ -1580,7 +1577,6 @@ document.addEventListener("click", function(e){
     const apto = (typeof nav!=="undefined" && nav.params) ? nav.params.apto : null;
     if(!obraId || !blockId || !apto || !id) return;
 
-    if(act==="edit") return actEditPend(obraId, blockId, apto, id);
     if(act==="del") return actDeletePend(obraId, blockId, apto, id);
     if(act==="foto") return actAddFotoPend(obraId, blockId, apto, id);
     if(act==="feito") return actFeito(obraId, blockId, apto, id);
