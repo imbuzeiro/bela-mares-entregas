@@ -125,14 +125,12 @@ function seed(){
 }
 
 function loadState(){
-  // 1) localStorage (fast)  2) Firestore (if configured) will overwrite via listener
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
     if(!raw) return seed();
     const parsed = JSON.parse(raw);
     if(!parsed || !parsed.version) return seed();
     if(parsed.version !== 19) return seed();
-    if(!parsed._meta) parsed._meta = {};
     return parsed;
   }catch(e){
     return seed();
@@ -140,102 +138,102 @@ function loadState(){
 }
 let state = loadState();
 
-// ---- Firestore (live sync) ----
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
-  authDomain: "bela-mares-entregas.firebaseapp.com",
-  projectId: "bela-mares-entregas",
-  storageBucket: "bela-mares-entregas.firebasestorage.app",
-  messagingSenderId: "159475494264",
-  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
-};
+// ================= Firebase (Firestore) sync (no build; compat SDK loaded in index.html) =================
+let fb = { enabled:false, db:null, ref:null, applyingRemote:false, pushTimer:null, lastPushed:"" };
 
-let fbApp = null;
-let fbDb = null;
-let fbReady = false;
-let fbUnsub = null;
-let lastRemoteTs = 0;
-let isApplyingRemote = false;
-let saveTimer = null;
-
-function initFirestore(){
+function initFirebaseSync(){
   try{
-    if(!window.firebase || !window.firebase.initializeApp || !window.firebase.firestore) return;
-    fbApp = window.firebase.apps && window.firebase.apps.length ? window.firebase.apps[0] : window.firebase.initializeApp(FIREBASE_CONFIG);
-    fbDb  = window.firebase.firestore();
-    fbReady = true;
+    if(!window.firebase || !window.firebase.initializeApp) return; // scripts not loaded
+    // Avoid double-init if page hot-reloads
+    if(!firebase.apps || !firebase.apps.length){
+      firebase.initializeApp({
+        apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
+        authDomain: "bela-mares-entregas.firebaseapp.com",
+        projectId: "bela-mares-entregas",
+        storageBucket: "bela-mares-entregas.firebasestorage.app",
+        messagingSenderId: "159475494264",
+        appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
+      });
+    }
+    fb.db = firebase.firestore();
+    // Firestore path: apps / bela_mares_checklist / state / main
+    fb.ref = fb.db.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+    fb.enabled = true;
 
-    const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
-
-    // subscribe
-    if(fbUnsub) try{ fbUnsub(); }catch(_){}
-    fbUnsub = ref.onSnapshot((snap)=>{
+    // Live updates (ignore our own pending writes)
+    fb.ref.onSnapshot((snap)=>{
       if(!snap.exists) return;
+      if(snap.metadata && snap.metadata.hasPendingWrites) return;
       const data = snap.data() || {};
-      const ts = (data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0);
-      if(!ts || ts <= lastRemoteTs) return;
-      lastRemoteTs = ts;
-
-      const remoteState = data.state;
-      if(!remoteState) return;
-
+      if(!data.state) return;
       try{
-        const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
-        if(!parsed || parsed.version !== 19) return;
+        const remote = data.state;
+        const remoteJson = JSON.stringify(remote);
+        const localJson  = JSON.stringify(state);
+        if(remoteJson === localJson) return;
 
-        // only apply if remote is newer than local
-        const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
-        if(ts <= localTs) return;
-
-        isApplyingRemote = true;
-        state = parsed;
-        if(!state._meta) state._meta = {};
-        state._meta.updatedAt = ts;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        // re-render current screen
-        try{ render(); }catch(_){}
-      }catch(e){}
-      finally{
-        isApplyingRemote = false;
+        fb.applyingRemote = true;
+        state = remote;
+        // keep a local cache too
+        try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(_){}
+        fb.applyingRemote = false;
+        render();
+      }catch(err){
+        console.warn("Erro ao aplicar estado remoto:", err);
+        fb.applyingRemote = false;
       }
+    }, (err)=>{
+      console.warn("Firestore snapshot error:", err);
     });
-  }catch(e){
-    fbReady = false;
+
+    // Ensure initial doc exists (do not overwrite if already exists)
+    fb.ref.get().then((snap)=>{
+      if(!snap.exists){
+        pushStateToFirebase(); // create
+      }
+    }).catch(()=>{});
+  }catch(err){
+    console.warn("Firebase init falhou:", err);
+    fb.enabled = false;
   }
 }
 
-initFirestore();
-
-function queueSaveToFirestore(){
-  if(!fbReady) return;
-  if(saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(async ()=>{
-    try{
-      const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
-      const now = Date.now();
-      // don't upload while applying remote snapshot
-      if(isApplyingRemote) return;
-      const payload = {
-        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
-        updatedAtMs: now,
-        state: JSON.stringify(state)
-      };
-      await ref.set(payload, {merge:true});
-      // keep local meta in sync (ms is fine for comparison)
-      if(!state._meta) state._meta = {};
-      state._meta.updatedAt = now;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }catch(e){
-      // ignore
-    }
-  }, 400);
+function schedulePushState(){
+  if(!fb.enabled) return;
+  if(fb.applyingRemote) return;
+  clearTimeout(fb.pushTimer);
+  fb.pushTimer = setTimeout(()=>pushStateToFirebase(), 600);
 }
+
+function pushStateToFirebase(){
+  if(!fb.enabled) return;
+  if(fb.applyingRemote) return;
+  try{
+    const json = JSON.stringify(state);
+    if(json === fb.lastPushed) return;
+    fb.lastPushed = json;
+    fb.ref.set({
+      state,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge:true }).catch((err)=>{
+      console.warn("Falha ao enviar para Firestore:", err);
+    });
+  }catch(err){
+    console.warn("pushStateToFirebase erro:", err);
+  }
+}
+// =======================================================================================================
+
+initFirebaseSync();
 
 function saveState(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  // live sync (if enabled)
-  try{ queueSaveToFirestore(); }catch(_){}
+  try{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }catch(_){}
+  // keep everyone in sync (pc/celular) via Firestore
+  schedulePushState();
 }
+
 
 function safeName(obj){
   return (obj && obj.name) ? obj.name : "-";
@@ -976,9 +974,7 @@ function renderPendencias(container, obraId, blockId, apto){
             const mine = (p.createdBy && u && p.createdBy.id===u.id);
             const canEditMine = (canCreate(u) && mine);
             const btns = [];
-            if(canEditMine){
-              btns.push(`<button class="btn btn--ghost" data-act="edit" data-id="${p.id}">Editar</button>`);
-              btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
+            if(canEditMine){btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
             }
             return btns.join("");
           })()}
@@ -1036,8 +1032,7 @@ function renderPendencias(container, obraId, blockId, apto){
       if(act==="aprovar") return actAprovar(obraId, blockId, apto, id);
       if(act==="reprovar") return actReprovar(obraId, blockId, apto, id);
       if(act==="reabrir") return actReabrir(obraId, blockId, apto, id);
-      if(act==="foto") return actAddFotoPend(obraId, blockId, apto, id);
-      if(act==="edit") return actEditPend(obraId, blockId, apto, id);
+      if(act==="foto") { toast("Fotos desativadas nesta versão."); return; }
       if(act==="del") return actDeletePend(obraId, blockId, apto, id);
     };
   });
@@ -1603,60 +1598,6 @@ function renderSettings(root){
   }
 })();
 
-
-
-
-function canDeletePend(p){
-  const u = currentUser();
-  if(!u) return false;
-  if(u.role === "supervisor") return true;
-  if(u.role === "qualidade") return true;
-  return (p && p.criadoPor && p.criadoPor.id === u.id);
-}
-
-function actDel(id){
-  try{
-    if(!view || view.type !== "apt") return;
-    const obra = getObraById(view.obraId);
-    const apt  = obra && findApt(obra, view.bloco, view.apto);
-    if(!apt || !apt.pendencias) return;
-    const p = apt.pendencias.find(x=>x.id===id);
-    if(!p) return;
-    if(!canDeletePend(p)){
-      toast("Sem permissão para apagar.");
-      return;
-    }
-    if(!confirm("Apagar esta pendência?")) return;
-    apt.pendencias = apt.pendencias.filter(x=>x.id!==id);
-    saveState();
-    render();
-    toast("Pendência apagada.");
-  }catch(e){
-    toast("Falha ao apagar.");
-  }
-}
-
-function actDelPhoto(pId, photoId){
-  try{
-    if(!view || view.type !== "apt") return;
-    const obra = getObraById(view.obraId);
-    const apt  = obra && findApt(obra, view.bloco, view.apto);
-    if(!apt || !apt.pendencias) return;
-    const p = apt.pendencias.find(x=>x.id===pId);
-    if(!p || !p.fotos) return;
-    if(!canDeletePend(p)){
-      toast("Sem permissão para apagar foto.");
-      return;
-    }
-    if(!confirm("Apagar esta foto?")) return;
-    p.fotos = p.fotos.filter(f=>f.id!==photoId);
-    saveState();
-    render();
-    toast("Foto apagada.");
-  }catch(e){
-    toast("Falha ao apagar foto.");
-  }
-}
 
 
 // V33: Delegação de cliques para botões (Editar/Apagar/Foto/Feito/Aprovar/Reprovar/Reabrir)
