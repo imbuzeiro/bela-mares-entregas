@@ -5,6 +5,161 @@ const APP_VERSION = "classic-v34";
 
 const STORAGE_KEY = "bm_checklist_classic_v1";
 
+
+/* ===== Firebase (Firestore) — sync de USUÁRIOS (doc único) =====
+   - Mantém o app como está (dados locais continuam).
+   - Apenas sincroniza state.users entre dispositivos via Firestore.
+   - Sessão (state.session) NÃO é sincronizada.
+*/
+const FIREBASE_ENABLED = true;
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
+  authDomain: "bela-mares-entregas.firebaseapp.com",
+  projectId: "bela-mares-entregas",
+  storageBucket: "bela-mares-entregas.firebasestorage.app",
+  messagingSenderId: "159475494264",
+  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
+};
+const FIRESTORE_DOC_PATH = "apps/bela_mares_checklist"; // colecao/doc
+let _firebaseReady = null;
+let _fs = null;
+let _usersUnsub = null;
+let _suppressUsersPush = false;
+let _usersPushTimer = null;
+
+function _loadScript(src){
+  return new Promise((resolve, reject)=>{
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.onload = ()=>resolve();
+    s.onerror = ()=>reject(new Error("Falha ao carregar script: "+src));
+    document.head.appendChild(s);
+  });
+}
+
+async function ensureFirebase(){
+  if(!FIREBASE_ENABLED) return null;
+  if(_firebaseReady) return _firebaseReady;
+  _firebaseReady = (async ()=>{
+    // firebase compat (não-module) — funciona com GitHub Pages
+    if(!window.firebase){
+      await _loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js");
+      await _loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js");
+    }
+    if(!window.firebase.apps || !window.firebase.apps.length){
+      window.firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    _fs = window.firebase.firestore();
+    return _fs;
+  })().catch(err=>{
+    console.warn("Firebase indisponível, seguindo local:", err);
+    return null;
+  });
+  return _firebaseReady;
+}
+
+function _docRef(){
+  if(!_fs) return null;
+  const parts = FIRESTORE_DOC_PATH.split("/");
+  return _fs.collection(parts[0]).doc(parts[1]);
+}
+
+async function pullUsersFromFirestore(){
+  const fs = await ensureFirebase();
+  if(!fs) return null;
+  try{
+    const ref = _docRef();
+    const snap = await ref.get();
+    if(!snap.exists) return null;
+    const data = snap.data() || {};
+    if(Array.isArray(data.users)) return data.users;
+    return null;
+  }catch(err){
+    console.warn("Falha ao puxar users do Firestore:", err);
+    return null;
+  }
+}
+
+function _dedupeUsers(arr){
+  const seen = new Set();
+  const out = [];
+  (arr||[]).forEach(u=>{
+    if(!u || !u.id) return;
+    const id = String(u.id).trim().toLowerCase();
+    if(seen.has(id)) return;
+    seen.add(id);
+    out.push({ ...u, id });
+  });
+  return out;
+}
+
+async function startUsersRealtime(){
+  const fs = await ensureFirebase();
+  if(!fs) return;
+  if(_usersUnsub) return;
+  try{
+    const ref = _docRef();
+    _usersUnsub = ref.onSnapshot((snap)=>{
+      if(!snap.exists) return;
+      const data = snap.data() || {};
+      if(!Array.isArray(data.users)) return;
+
+      const remoteUsers = _dedupeUsers(data.users);
+      // só atualiza se realmente mudou (evita loop)
+      const localStr = JSON.stringify(_dedupeUsers(state.users));
+      const remoteStr = JSON.stringify(remoteUsers);
+      if(localStr === remoteStr) return;
+
+      _suppressUsersPush = true;
+      state.users = remoteUsers;
+      saveState(); // não empurra porque suppress
+      _suppressUsersPush = false;
+
+      // se estiver na tela users/login, re-renderiza
+      try{ render(); }catch(_){}
+    }, (err)=>{
+      console.warn("Snapshot users erro:", err);
+    });
+  }catch(err){
+    console.warn("Falha ao iniciar realtime users:", err);
+  }
+}
+
+function pushUsersToFirestoreDebounced(){
+  if(_suppressUsersPush) return;
+  if(_usersPushTimer) clearTimeout(_usersPushTimer);
+  _usersPushTimer = setTimeout(async ()=>{
+    const fs = await ensureFirebase();
+    if(!fs) return;
+    try{
+      const ref = _docRef();
+      const users = _dedupeUsers(state.users);
+      await ref.set({
+        users,
+        usersUpdatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }catch(err){
+      console.warn("Falha ao enviar users para Firestore:", err);
+    }
+  }, 250);
+}
+
+async function bootstrapUsersSync(){
+  // puxa 1x e depois fica ouvindo realtime
+  const remoteUsers = await pullUsersFromFirestore();
+  if(remoteUsers && remoteUsers.length){
+    state.users = _dedupeUsers(remoteUsers);
+    saveState();
+  }else{
+    // primeira vez: sobe os users locais como base (sem session)
+    pushUsersToFirestoreDebounced();
+  }
+  startUsersRealtime();
+}
+/* ===== fim Firebase users sync ===== */
+
+
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
@@ -17,16 +172,6 @@ function toast(msg){
   el.style.display = "block";
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>{ el.style.display="none"; }, 2400);
-}
-
-// --- Role normalization (more forgiving input) ---
-function normalizeRoleInput(raw){
-  return (raw || "")
-    .toString()
-    .trim()
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
-    .replace(/[^a-z_]/g, ""); // keep letters/underscore only
 }
 function esc(s){ return String(s||"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
 
@@ -69,41 +214,6 @@ function readImageAsDataURL(file){
     r.onerror=()=>reject(r.error||new Error("Falha ao ler imagem"));
     r.readAsDataURL(file);
   });
-}
-
-
-async function compressImageFileToDataURL(file, opts={}){
-  const maxDim = opts.maxDim ?? 1600;
-  const maxBytes = opts.maxBytes ?? 1200000; // ~1.2MB
-  let quality = opts.quality ?? 0.78;
-
-  const dataUrl = await readImageAsDataURL(file);
-
-  const img = await new Promise((res, rej)=>{
-    const i = new Image();
-    i.onload = ()=>res(i);
-    i.onerror = rej;
-    i.src = dataUrl;
-  });
-
-  let w = img.width, h = img.height;
-  const scale = Math.min(1, maxDim / Math.max(w,h));
-  w = Math.max(1, Math.round(w * scale));
-  h = Math.max(1, Math.round(h * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = w; canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0, w, h);
-
-  const approxBytes = (d)=> Math.ceil((d.length - (d.indexOf(",")+1)) * 3/4);
-
-  let out = canvas.toDataURL("image/jpeg", quality);
-  while(approxBytes(out) > maxBytes && quality > 0.35){
-    quality = Math.max(0.35, quality - 0.08);
-    out = canvas.toDataURL("image/jpeg", quality);
-  }
-  return out;
 }
 
 function uid(prefix="id"){
@@ -185,6 +295,10 @@ let state = loadState();
 
 function saveState(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  // sincroniza usuários (não sincroniza sessão)
+  if(!_suppressUsersPush){
+    pushUsersToFirestoreDebounced();
+  }
 }
 
 
@@ -199,21 +313,12 @@ function ensureEvents(p){
   return p.events;
 }
 function pushEvent(p, type, u, extra){
-  const events = ensureEvents(p);
-  // Anti-duplicação: evita registrar o mesmo evento duas vezes por clique duplo
-  // (especialmente em celular) em um intervalo muito curto.
-  const nowIso = new Date().toISOString();
-  const last = events[events.length-1];
-  if(last && last.type===type && last.by && u && last.by.id===u.id){
-    const dt = Math.abs(new Date(nowIso).getTime() - new Date(last.at).getTime());
-    if(dt < 1500) return; // ignora duplicado
-  }
   const ev = Object.assign({
     type,
-    at: nowIso,
+    at: new Date().toISOString(),
     by: u ? { id:u.id, name:u.name, role:u.role } : null
   }, extra||{});
-  events.push(ev);
+  ensureEvents(p).push(ev);
 }
 function fmtEvent(ev){
   const who = ev.by ? (safeName(ev.by) + " (" + safeRole(ev.by) + ")") : "-";
@@ -256,14 +361,6 @@ function canManageObras(u){
 
 function canManageUsers(u){
   return ["qualidade","supervisor"].includes(u.role);
-}
-
-function canChangePin(me, target){
-  if(!me || !target) return false;
-  if(me.role==="supervisor") return true;
-  // Qualidade pode alterar PIN apenas de Execução e Qualidade
-  if(me.role==="qualidade") return ["execucao","qualidade"].includes(target.role);
-  return false;
 }
 
 function canResetData(u){
@@ -433,10 +530,19 @@ function renderLogin(root){
     </div>
   `;
 
-  $("#btnLogin").onclick = ()=>{
-    const id = ($("#loginUser").value||"").trim().toLowerCase();
+  $("#btnLogin").onclick = async ()=>{
+    const id = ($("#loginUser").value||"").trim();
     const pin = ($("#loginPin").value||"").trim();
-    const user = state.users.find(u=>u.id===id && u.active);
+    let user = state.users.find(u=>u.id===id && u.active);
+    if(!user){
+      // tenta puxar do Firestore (usuários criados em outro aparelho)
+      const remote = await pullUsersFromFirestore();
+      if(remote && remote.length){
+        state.users = _dedupeUsers(remote);
+        saveState();
+      }
+      user = state.users.find(u=>u.id===id && u.active);
+    }
     if(!user){ toast("Usuário inválido"); return; }
     if(user.pin !== pin){ toast("PIN incorreto"); return; }
     state.session = { userId: user.id };
@@ -662,7 +768,7 @@ function renderHome(root){
         if(!r.ok){ toast(r.msg); return; }
 
         // criar (opcional) login de execução 1 por obra
-        const execUser = (($("#mExecUser", backdrop).value||"").trim().toLowerCase());
+        const execUser = (($("#mExecUser", backdrop).value||"").trim());
         const execPin  = (($("#mExecPin", backdrop).value||"").trim());
 
         if(execUser || execPin){
@@ -886,8 +992,9 @@ function renderApto(root){
       input.type="file"; input.accept="image/*"; input.capture="environment";
       input.onchange = async ()=>{
         const file = input.files && input.files[0]; if(!file) return;
+        if(file.size > 1_500_000){ toast("Foto muito pesada. Tente uma menor."); return; }
         try{
-          const dataUrl = await compressImageFileToDataURL(file,{maxDim:1600,maxBytes:1200000,quality:0.78});
+          const dataUrl = await readImageAsDataURL(file);
           apt.photos = apt.photos || [];
           apt.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name } });
           saveState();
@@ -957,33 +1064,16 @@ function renderPendencias(container, obraId, blockId, apto){
           <b>Histórico</b><br>
           ${(()=>{
             const lines = [];
-            const hasEvents = !!(p.events && p.events.length);
-            const typeSet = new Set(hasEvents ? p.events.map(ev=>ev.type) : []);
-
-            // Compat (campos antigos): só mostra se não houver eventos equivalentes.
-            if(p.createdAt && (!hasEvents || !typeSet.has('criado')))
-              lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
-            if(p.doneAt && (!hasEvents || !typeSet.has('feito')))
-              lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
-            if(p.reviewedAt && (!hasEvents || !typeSet.has('aprovado')))
-              lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
-            if(p.reopenedAt && (!hasEvents || !typeSet.has('reaberto')))
-              lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
-
-            // Eventos acumulados (com deduplicação)
-            if(hasEvents){
-              const seen = new Set();
-              p.events.forEach(ev=>{
-                // Dedup visual: mesma ação + mesmo usuário no mesmo minuto
-                const byId = (ev.by && ev.by.id) || '';
-                const atMin = (ev.at || '').slice(0,16); // YYYY-MM-DDTHH:MM
-                const key = `${ev.type}|${byId}|${atMin}`;
-                if(seen.has(key)) return;
-                seen.add(key);
-                lines.push(fmtEvent(ev));
-              });
+            // compat (campos antigos)
+            if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
+            if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
+            if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
+            if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
+            // eventos acumulados
+            if(p.events && p.events.length){
+              p.events.forEach(ev=>lines.push(fmtEvent(ev)));
             }
-
+            // remove duplicados simples
             return lines.join("<br>");
           })()}
         </div>
@@ -1126,8 +1216,14 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
   input.capture = "environment";
   input.onchange = async ()=>{
     const file = input.files && input.files[0];
-    if(!file) return;    try{
-      const dataUrl = await compressImageFileToDataURL(file,{maxDim:1600,maxBytes:1200000,quality:0.78});
+    if(!file) return;
+    // basic size guard (~1.5MB)
+    if(file.size > 1_500_000){
+      toast("Foto muito pesada. Tente uma menor.");
+      return;
+    }
+    try{
+      const dataUrl = await readImageAsDataURL(file);
       const { p } = findPend(obraId, blockId, apto, pendId);
       if(!p) return;
       p.photos = p.photos || [];
@@ -1210,7 +1306,7 @@ function openPhotoViewer(src, meta){
         <button class="btn btn--ghost" id="mClose">✕</button>
       </div>
       <div class="hr"></div>
-      <img src="${esc(src)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
+      <img src="${esc(dataUrl)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
     </div>
   `);
   $("#mClose", backdrop).onclick = close;
@@ -1349,7 +1445,6 @@ function renderUsers(root){
           <div class="row" style="gap:8px">
             <button id="btnBackUsers" class="btn">Voltar</button>
             ${canCreateSupervisor(u) ? `<button id="btnAddSup" class="btn btn--orange">+ Supervisor</button>` : ``}
-            ${u.role==="supervisor" ? `<button id="btnAddUser" class="btn">+ Usuário</button>` : ``}
           </div>
         </div>
         <div class="hr"></div>
@@ -1372,7 +1467,7 @@ function renderUsers(root){
                   <td class="small">${esc(x.role)}</td>
                   <td class="small">${esc(access)}</td>
                   <td style="text-align:right; white-space:nowrap">
-                    ${canChangePin(u, x) ? `<button class="btn" data-pin="${esc(x.id)}">Alterar PIN</button>` : ``}
+                    <button class="btn" data-pin="${esc(x.id)}">Alterar PIN</button>
                     ${u.role==="supervisor" && x.role!=="diretor" ? `<button class="btn btn--red" data-off="${esc(x.id)}">Desativar</button>` : ``}
                   </td>
                 </tr>
@@ -1383,7 +1478,7 @@ function renderUsers(root){
 
         <div class="hr"></div>
         <div class="small">
-          <b>Regras:</b> Supervisor pode criar perfis (supervisor, qualidade e visualização) e alterar PIN de qualquer um. Qualidade pode criar Execução e alterar PIN apenas de Execução e Qualidade.
+          <b>Regras:</b> Qualidade e Supervisor podem gerenciar usuários. Somente Supervisor cria outro Supervisor e pode desativar usuários.
         </div>
       </div>
 
@@ -1424,7 +1519,7 @@ function renderUsers(root){
 
   $("#btnCreateExec").onclick = ()=>{
     const obraId = $("#execObra").value;
-    const userId = ($("#execUser").value||"").trim().toLowerCase();
+    const userId = ($("#execUser").value||"").trim();
     const pin = ($("#execPin").value||"").trim();
     if(!userId){ toast("Informe o usuário."); return; }
     if(!/^[0-9]{4}$/.test(pin)){ toast("PIN deve ter 4 dígitos."); return; }
@@ -1445,9 +1540,6 @@ function renderUsers(root){
   $$('button[data-pin]').forEach(b=>{
     b.onclick = ()=>{
       const id = b.getAttribute("data-pin");
-      const me = currentUser();
-      const target = state.users.find(x=>x.id===id);
-      if(!canChangePin(me, target)){ toast("Sem permissão."); return; }
       const newPin = prompt("Novo PIN (4 dígitos) para: "+id) || "";
       if(!/^[0-9]{4}$/.test(newPin.trim())){ toast("PIN inválido."); return; }
       const user = state.users.find(x=>x.id===id);
@@ -1483,7 +1575,7 @@ function renderUsers(root){
     addSup.onclick = ()=>{
       const id = prompt("Usuário do novo Supervisor (ex.: supervisor_02)") || "";
       const pin = prompt("PIN (4 dígitos) do novo Supervisor:") || "";
-      const uid = id.trim().toLowerCase();
+      const uid = id.trim();
       const p = pin.trim();
       if(!uid){ toast("Usuário inválido."); return; }
       if(!/^[0-9]{4}$/.test(p)){ toast("PIN inválido."); return; }
@@ -1494,30 +1586,6 @@ function renderUsers(root){
       goto("users");
     };
   }
-
-  const addUser = $("#btnAddUser");
-  if(addUser){
-    addUser.onclick = ()=>{
-      const role = normalizeRoleInput(prompt("Perfil do usuário (qualidade, diretor, engenheiro, coordenador):") || "");
-      const allowed = ["qualidade","diretor","engenheiro","coordenador"];
-      if(!allowed.includes(role)){
-        toast("Perfil inválido. Use: qualidade, diretor, engenheiro, coordenador.");
-        return;
-      }
-      const id = (prompt("Usuário (ex.: "+role+"_01):") || "").trim().toLowerCase();
-      const pin = (prompt("PIN (4 dígitos):") || "").trim();
-      if(!id){ toast("Usuário inválido."); return; }
-      if(!/^[0-9]{4}$/.test(pin)){ toast("PIN inválido."); return; }
-      if(state.users.find(x=>x.id===id)){ toast("Usuário já existe."); return; }
-      const access = (role==="qualidade") ? ["*"] : ["*"];
-      const nameMap = { qualidade:"Qualidade", diretor:"Diretor (Visualização)", engenheiro:"Engenheiro (Visualização)", coordenador:"Coordenador (Visualização)" };
-      state.users.push({ id, name: nameMap[role]||role, role, pin, obraIds: access, active:true });
-      saveState();
-      toast("Usuário criado.");
-      goto("users");
-    };
-  }
-
 }
 
 
@@ -1664,3 +1732,8 @@ document.addEventListener("click", function(e){
 
 let __feitoLock = {};
 function _lockKey(obraId, blockId, apto, pendId){ return [obraId,blockId,apto,pendId].join("|"); }
+
+
+// Boot: inicia sync de usuários (Firestore) e renderiza
+bootstrapUsersSync();
+render();
