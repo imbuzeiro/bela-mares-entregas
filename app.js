@@ -1069,6 +1069,8 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
     }
   };
   input.click();
+}
+
 function actEditPend(obraId, blockId, apto, pendId){
   const u = currentUser();
   const { p } = findPend(obraId, blockId, apto, pendId);
@@ -1116,9 +1118,6 @@ function actDeletePhoto(obraId, blockId, apto, pendId, photoId){
   saveState();
   toast("Foto apagada.");
   render();
-}
-
-
 }
 
 function openPhotoViewer(src, meta){
