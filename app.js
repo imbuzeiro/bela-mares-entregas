@@ -239,7 +239,11 @@ function applyRemoteState(remoteState, remoteUpdatedAtMs){
   if(remoteUpdatedAtMs && remoteUpdatedAtMs <= fb.lastAppliedMs) return;
 
   fb.suppress = true;
+  // NÃO sincronizar sessão/login entre dispositivos.
+  // Se sincronizar, um usuário acaba "logando" todo mundo.
+  const localSession = state && state.session ? state.session : null;
   state = remoteState;
+  if(localSession) state.session = localSession;
   // salva local também, para abrir offline
   try{ saveStateLocal(); }catch(_){}
   fb.lastAppliedMs = remoteUpdatedAtMs || Date.now();
@@ -314,12 +318,20 @@ function scheduleRemoteWrite(force){
   }
 }
 
+// Exporta apenas dados do aplicativo para o Firestore (SEM sessão/login local).
+function buildRemoteState(){
+  const s = JSON.parse(JSON.stringify(state || {}));
+  // sessão é por dispositivo/aba
+  delete s.session;
+  return s;
+}
+
 function remoteWriteNow(){
   if(!fb.enabled) return;
   if(fb.suppress) return;
   fb.lastWriteMs = Date.now();
   const payload = {
-    state: state,
+    state: buildRemoteState(),
     updatedAtMs: fb.lastWriteMs,
   };
   fb.docRef.set(payload, { merge:true }).catch((e)=>{
