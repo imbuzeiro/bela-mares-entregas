@@ -18,6 +18,16 @@ function toast(msg){
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>{ el.style.display="none"; }, 2400);
 }
+
+// --- Role normalization (more forgiving input) ---
+function normalizeRoleInput(raw){
+  return (raw || "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
+    .replace(/[^a-z_]/g, ""); // keep letters/underscore only
+}
 function esc(s){ return String(s||"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
 
 
@@ -59,6 +69,41 @@ function readImageAsDataURL(file){
     r.onerror=()=>reject(r.error||new Error("Falha ao ler imagem"));
     r.readAsDataURL(file);
   });
+}
+
+
+async function compressImageFileToDataURL(file, opts={}){
+  const maxDim = opts.maxDim ?? 1600;
+  const maxBytes = opts.maxBytes ?? 1200000; // ~1.2MB
+  let quality = opts.quality ?? 0.78;
+
+  const dataUrl = await readImageAsDataURL(file);
+
+  const img = await new Promise((res, rej)=>{
+    const i = new Image();
+    i.onload = ()=>res(i);
+    i.onerror = rej;
+    i.src = dataUrl;
+  });
+
+  let w = img.width, h = img.height;
+  const scale = Math.min(1, maxDim / Math.max(w,h));
+  w = Math.max(1, Math.round(w * scale));
+  h = Math.max(1, Math.round(h * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, w, h);
+
+  const approxBytes = (d)=> Math.ceil((d.length - (d.indexOf(",")+1)) * 3/4);
+
+  let out = canvas.toDataURL("image/jpeg", quality);
+  while(approxBytes(out) > maxBytes && quality > 0.35){
+    quality = Math.max(0.35, quality - 0.08);
+    out = canvas.toDataURL("image/jpeg", quality);
+  }
+  return out;
 }
 
 function uid(prefix="id"){
@@ -125,14 +170,12 @@ function seed(){
 }
 
 function loadState(){
-  // 1) localStorage (fast)  2) Firestore (if configured) will overwrite via listener
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
     if(!raw) return seed();
     const parsed = JSON.parse(raw);
     if(!parsed || !parsed.version) return seed();
     if(parsed.version !== 19) return seed();
-    if(!parsed._meta) parsed._meta = {};
     return parsed;
   }catch(e){
     return seed();
@@ -140,102 +183,10 @@ function loadState(){
 }
 let state = loadState();
 
-// ---- Firestore (live sync) ----
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
-  authDomain: "bela-mares-entregas.firebaseapp.com",
-  projectId: "bela-mares-entregas",
-  storageBucket: "bela-mares-entregas.firebasestorage.app",
-  messagingSenderId: "159475494264",
-  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
-};
-
-let fbApp = null;
-let fbDb = null;
-let fbReady = false;
-let fbUnsub = null;
-let lastRemoteTs = 0;
-let isApplyingRemote = false;
-let saveTimer = null;
-
-function initFirestore(){
-  try{
-    if(!window.firebase || !window.firebase.initializeApp || !window.firebase.firestore) return;
-    fbApp = window.firebase.apps && window.firebase.apps.length ? window.firebase.apps[0] : window.firebase.initializeApp(FIREBASE_CONFIG);
-    fbDb  = window.firebase.firestore();
-    fbReady = true;
-
-    const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
-
-    // subscribe
-    if(fbUnsub) try{ fbUnsub(); }catch(_){}
-    fbUnsub = ref.onSnapshot((snap)=>{
-      if(!snap.exists) return;
-      const data = snap.data() || {};
-      const ts = (data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0);
-      if(!ts || ts <= lastRemoteTs) return;
-      lastRemoteTs = ts;
-
-      const remoteState = data.state;
-      if(!remoteState) return;
-
-      try{
-        const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
-        if(!parsed || parsed.version !== 19) return;
-
-        // only apply if remote is newer than local
-        const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
-        if(ts <= localTs) return;
-
-        isApplyingRemote = true;
-        state = parsed;
-        if(!state._meta) state._meta = {};
-        state._meta.updatedAt = ts;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        // re-render current screen
-        try{ render(); }catch(_){}
-      }catch(e){}
-      finally{
-        isApplyingRemote = false;
-      }
-    });
-  }catch(e){
-    fbReady = false;
-  }
-}
-
-initFirestore();
-
-function queueSaveToFirestore(){
-  if(!fbReady) return;
-  if(saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(async ()=>{
-    try{
-      const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
-      const now = Date.now();
-      // don't upload while applying remote snapshot
-      if(isApplyingRemote) return;
-      const payload = {
-        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
-        updatedAtMs: now,
-        state: JSON.stringify(state)
-      };
-      await ref.set(payload, {merge:true});
-      // keep local meta in sync (ms is fine for comparison)
-      if(!state._meta) state._meta = {};
-      state._meta.updatedAt = now;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }catch(e){
-      // ignore
-    }
-  }, 400);
-}
-
 function saveState(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  // live sync (if enabled)
-  try{ queueSaveToFirestore(); }catch(_){}
 }
+
 
 function safeName(obj){
   return (obj && obj.name) ? obj.name : "-";
@@ -248,12 +199,21 @@ function ensureEvents(p){
   return p.events;
 }
 function pushEvent(p, type, u, extra){
+  const events = ensureEvents(p);
+  // Anti-duplicação: evita registrar o mesmo evento duas vezes por clique duplo
+  // (especialmente em celular) em um intervalo muito curto.
+  const nowIso = new Date().toISOString();
+  const last = events[events.length-1];
+  if(last && last.type===type && last.by && u && last.by.id===u.id){
+    const dt = Math.abs(new Date(nowIso).getTime() - new Date(last.at).getTime());
+    if(dt < 1500) return; // ignora duplicado
+  }
   const ev = Object.assign({
     type,
-    at: new Date().toISOString(),
+    at: nowIso,
     by: u ? { id:u.id, name:u.name, role:u.role } : null
   }, extra||{});
-  ensureEvents(p).push(ev);
+  events.push(ev);
 }
 function fmtEvent(ev){
   const who = ev.by ? (safeName(ev.by) + " (" + safeRole(ev.by) + ")") : "-";
@@ -296,6 +256,14 @@ function canManageObras(u){
 
 function canManageUsers(u){
   return ["qualidade","supervisor"].includes(u.role);
+}
+
+function canChangePin(me, target){
+  if(!me || !target) return false;
+  if(me.role==="supervisor") return true;
+  // Qualidade pode alterar PIN apenas de Execução e Qualidade
+  if(me.role==="qualidade") return ["execucao","qualidade"].includes(target.role);
+  return false;
 }
 
 function canResetData(u){
@@ -466,7 +434,7 @@ function renderLogin(root){
   `;
 
   $("#btnLogin").onclick = ()=>{
-    const id = ($("#loginUser").value||"").trim();
+    const id = ($("#loginUser").value||"").trim().toLowerCase();
     const pin = ($("#loginPin").value||"").trim();
     const user = state.users.find(u=>u.id===id && u.active);
     if(!user){ toast("Usuário inválido"); return; }
@@ -694,7 +662,7 @@ function renderHome(root){
         if(!r.ok){ toast(r.msg); return; }
 
         // criar (opcional) login de execução 1 por obra
-        const execUser = (($("#mExecUser", backdrop).value||"").trim());
+        const execUser = (($("#mExecUser", backdrop).value||"").trim().toLowerCase());
         const execPin  = (($("#mExecPin", backdrop).value||"").trim());
 
         if(execUser || execPin){
@@ -918,9 +886,8 @@ function renderApto(root){
       input.type="file"; input.accept="image/*"; input.capture="environment";
       input.onchange = async ()=>{
         const file = input.files && input.files[0]; if(!file) return;
-        if(file.size > 1_500_000){ toast("Foto muito pesada. Tente uma menor."); return; }
         try{
-          const dataUrl = await readImageAsDataURL(file);
+          const dataUrl = await compressImageFileToDataURL(file,{maxDim:1600,maxBytes:1200000,quality:0.78});
           apt.photos = apt.photos || [];
           apt.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name } });
           saveState();
@@ -990,16 +957,33 @@ function renderPendencias(container, obraId, blockId, apto){
           <b>Histórico</b><br>
           ${(()=>{
             const lines = [];
-            // compat (campos antigos)
-            if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
-            if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
-            if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
-            if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
-            // eventos acumulados
-            if(p.events && p.events.length){
-              p.events.forEach(ev=>lines.push(fmtEvent(ev)));
+            const hasEvents = !!(p.events && p.events.length);
+            const typeSet = new Set(hasEvents ? p.events.map(ev=>ev.type) : []);
+
+            // Compat (campos antigos): só mostra se não houver eventos equivalentes.
+            if(p.createdAt && (!hasEvents || !typeSet.has('criado')))
+              lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
+            if(p.doneAt && (!hasEvents || !typeSet.has('feito')))
+              lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
+            if(p.reviewedAt && (!hasEvents || !typeSet.has('aprovado')))
+              lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
+            if(p.reopenedAt && (!hasEvents || !typeSet.has('reaberto')))
+              lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
+
+            // Eventos acumulados (com deduplicação)
+            if(hasEvents){
+              const seen = new Set();
+              p.events.forEach(ev=>{
+                // Dedup visual: mesma ação + mesmo usuário no mesmo minuto
+                const byId = (ev.by && ev.by.id) || '';
+                const atMin = (ev.at || '').slice(0,16); // YYYY-MM-DDTHH:MM
+                const key = `${ev.type}|${byId}|${atMin}`;
+                if(seen.has(key)) return;
+                seen.add(key);
+                lines.push(fmtEvent(ev));
+              });
             }
-            // remove duplicados simples
+
             return lines.join("<br>");
           })()}
         </div>
@@ -1142,14 +1126,8 @@ async function actAddFotoPend(obraId, blockId, apto, pendId){
   input.capture = "environment";
   input.onchange = async ()=>{
     const file = input.files && input.files[0];
-    if(!file) return;
-    // basic size guard (~1.5MB)
-    if(file.size > 1_500_000){
-      toast("Foto muito pesada. Tente uma menor.");
-      return;
-    }
-    try{
-      const dataUrl = await readImageAsDataURL(file);
+    if(!file) return;    try{
+      const dataUrl = await compressImageFileToDataURL(file,{maxDim:1600,maxBytes:1200000,quality:0.78});
       const { p } = findPend(obraId, blockId, apto, pendId);
       if(!p) return;
       p.photos = p.photos || [];
@@ -1232,7 +1210,7 @@ function openPhotoViewer(src, meta){
         <button class="btn btn--ghost" id="mClose">✕</button>
       </div>
       <div class="hr"></div>
-      <img src="${esc(dataUrl)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
+      <img src="${esc(src)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
     </div>
   `);
   $("#mClose", backdrop).onclick = close;
@@ -1371,6 +1349,7 @@ function renderUsers(root){
           <div class="row" style="gap:8px">
             <button id="btnBackUsers" class="btn">Voltar</button>
             ${canCreateSupervisor(u) ? `<button id="btnAddSup" class="btn btn--orange">+ Supervisor</button>` : ``}
+            ${u.role==="supervisor" ? `<button id="btnAddUser" class="btn">+ Usuário</button>` : ``}
           </div>
         </div>
         <div class="hr"></div>
@@ -1393,7 +1372,7 @@ function renderUsers(root){
                   <td class="small">${esc(x.role)}</td>
                   <td class="small">${esc(access)}</td>
                   <td style="text-align:right; white-space:nowrap">
-                    <button class="btn" data-pin="${esc(x.id)}">Alterar PIN</button>
+                    ${canChangePin(u, x) ? `<button class="btn" data-pin="${esc(x.id)}">Alterar PIN</button>` : ``}
                     ${u.role==="supervisor" && x.role!=="diretor" ? `<button class="btn btn--red" data-off="${esc(x.id)}">Desativar</button>` : ``}
                   </td>
                 </tr>
@@ -1404,7 +1383,7 @@ function renderUsers(root){
 
         <div class="hr"></div>
         <div class="small">
-          <b>Regras:</b> Qualidade e Supervisor podem gerenciar usuários. Somente Supervisor cria outro Supervisor e pode desativar usuários.
+          <b>Regras:</b> Supervisor pode criar perfis (supervisor, qualidade e visualização) e alterar PIN de qualquer um. Qualidade pode criar Execução e alterar PIN apenas de Execução e Qualidade.
         </div>
       </div>
 
@@ -1445,7 +1424,7 @@ function renderUsers(root){
 
   $("#btnCreateExec").onclick = ()=>{
     const obraId = $("#execObra").value;
-    const userId = ($("#execUser").value||"").trim();
+    const userId = ($("#execUser").value||"").trim().toLowerCase();
     const pin = ($("#execPin").value||"").trim();
     if(!userId){ toast("Informe o usuário."); return; }
     if(!/^[0-9]{4}$/.test(pin)){ toast("PIN deve ter 4 dígitos."); return; }
@@ -1466,6 +1445,9 @@ function renderUsers(root){
   $$('button[data-pin]').forEach(b=>{
     b.onclick = ()=>{
       const id = b.getAttribute("data-pin");
+      const me = currentUser();
+      const target = state.users.find(x=>x.id===id);
+      if(!canChangePin(me, target)){ toast("Sem permissão."); return; }
       const newPin = prompt("Novo PIN (4 dígitos) para: "+id) || "";
       if(!/^[0-9]{4}$/.test(newPin.trim())){ toast("PIN inválido."); return; }
       const user = state.users.find(x=>x.id===id);
@@ -1501,7 +1483,7 @@ function renderUsers(root){
     addSup.onclick = ()=>{
       const id = prompt("Usuário do novo Supervisor (ex.: supervisor_02)") || "";
       const pin = prompt("PIN (4 dígitos) do novo Supervisor:") || "";
-      const uid = id.trim();
+      const uid = id.trim().toLowerCase();
       const p = pin.trim();
       if(!uid){ toast("Usuário inválido."); return; }
       if(!/^[0-9]{4}$/.test(p)){ toast("PIN inválido."); return; }
@@ -1512,6 +1494,30 @@ function renderUsers(root){
       goto("users");
     };
   }
+
+  const addUser = $("#btnAddUser");
+  if(addUser){
+    addUser.onclick = ()=>{
+      const role = normalizeRoleInput(prompt("Perfil do usuário (qualidade, diretor, engenheiro, coordenador):") || "");
+      const allowed = ["qualidade","diretor","engenheiro","coordenador"];
+      if(!allowed.includes(role)){
+        toast("Perfil inválido. Use: qualidade, diretor, engenheiro, coordenador.");
+        return;
+      }
+      const id = (prompt("Usuário (ex.: "+role+"_01):") || "").trim().toLowerCase();
+      const pin = (prompt("PIN (4 dígitos):") || "").trim();
+      if(!id){ toast("Usuário inválido."); return; }
+      if(!/^[0-9]{4}$/.test(pin)){ toast("PIN inválido."); return; }
+      if(state.users.find(x=>x.id===id)){ toast("Usuário já existe."); return; }
+      const access = (role==="qualidade") ? ["*"] : ["*"];
+      const nameMap = { qualidade:"Qualidade", diretor:"Diretor (Visualização)", engenheiro:"Engenheiro (Visualização)", coordenador:"Coordenador (Visualização)" };
+      state.users.push({ id, name: nameMap[role]||role, role, pin, obraIds: access, active:true });
+      saveState();
+      toast("Usuário criado.");
+      goto("users");
+    };
+  }
+
 }
 
 
@@ -1603,60 +1609,6 @@ function renderSettings(root){
   }
 })();
 
-
-
-
-function canDeletePend(p){
-  const u = currentUser();
-  if(!u) return false;
-  if(u.role === "supervisor") return true;
-  if(u.role === "qualidade") return true;
-  return (p && p.criadoPor && p.criadoPor.id === u.id);
-}
-
-function actDel(id){
-  try{
-    if(!view || view.type !== "apt") return;
-    const obra = getObraById(view.obraId);
-    const apt  = obra && findApt(obra, view.bloco, view.apto);
-    if(!apt || !apt.pendencias) return;
-    const p = apt.pendencias.find(x=>x.id===id);
-    if(!p) return;
-    if(!canDeletePend(p)){
-      toast("Sem permissão para apagar.");
-      return;
-    }
-    if(!confirm("Apagar esta pendência?")) return;
-    apt.pendencias = apt.pendencias.filter(x=>x.id!==id);
-    saveState();
-    render();
-    toast("Pendência apagada.");
-  }catch(e){
-    toast("Falha ao apagar.");
-  }
-}
-
-function actDelPhoto(pId, photoId){
-  try{
-    if(!view || view.type !== "apt") return;
-    const obra = getObraById(view.obraId);
-    const apt  = obra && findApt(obra, view.bloco, view.apto);
-    if(!apt || !apt.pendencias) return;
-    const p = apt.pendencias.find(x=>x.id===pId);
-    if(!p || !p.fotos) return;
-    if(!canDeletePend(p)){
-      toast("Sem permissão para apagar foto.");
-      return;
-    }
-    if(!confirm("Apagar esta foto?")) return;
-    p.fotos = p.fotos.filter(f=>f.id!==photoId);
-    saveState();
-    render();
-    toast("Foto apagada.");
-  }catch(e){
-    toast("Falha ao apagar foto.");
-  }
-}
 
 
 // V33: Delegação de cliques para botões (Editar/Apagar/Foto/Feito/Aprovar/Reprovar/Reabrir)
