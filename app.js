@@ -1,4 +1,5 @@
-const APP_VERSION = "classic-v34";
+const APP_VERSION = "pdf-v2";
+const STATE_VERSION = 26;
 
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
@@ -75,8 +76,8 @@ function seed(){
     users: [
       { id:"supervisor_01", name:"Supervisor 01", role:"supervisor", pin:"3333", obraIds:["*"], active:true },
       { id:"qualidade_01", name:"Qualidade 01", role:"qualidade", pin:"2222", obraIds:["*"], active:true },
-      { id:"costa_rica", name:"Execução Costa Rica", role:"execucao", pin:"1234", obraIds:["costa_rica"], active:true },
-      { id:"costa_brava", name:"Execução Costa Brava", role:"execucao", pin:"5678", obraIds:["costa_brava"], active:true },
+      { id:"exec_costa_rica", name:"Execução Costa Rica", role:"execucao", pin:"1234", obraIds:["costa_rica"], active:true },
+      { id:"exec_costa_brava", name:"Execução Costa Brava", role:"execucao", pin:"5678", obraIds:["costa_brava"], active:true },
       { id:"coordenador", name:"Coordenador", role:"coordenador", pin:"7777", obraIds:["*"], active:true },
       { id:"engenheiro", name:"Engenheiro Geral", role:"engenheiro", pin:"8888", obraIds:["*"], active:true },
       { id:"diretor", name:"Diretor", role:"diretor", pin:"9999", obraIds:["*"], active:true },
@@ -125,12 +126,14 @@ function seed(){
 }
 
 function loadState(){
+  // 1) localStorage (fast)  2) Firestore (if configured) will overwrite via listener
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
     if(!raw) return seed();
     const parsed = JSON.parse(raw);
     if(!parsed || !parsed.version) return seed();
-    if(parsed.version !== 26) return seed();
+    if(parsed.version !== STATE_VERSION) return seed();
+    if(!parsed._meta) parsed._meta = {};
     return parsed;
   }catch(e){
     return seed();
@@ -138,10 +141,102 @@ function loadState(){
 }
 let state = loadState();
 
-function saveState(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+// ---- Firestore (live sync) ----
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
+  authDomain: "bela-mares-entregas.firebaseapp.com",
+  projectId: "bela-mares-entregas",
+  storageBucket: "bela-mares-entregas.firebasestorage.app",
+  messagingSenderId: "159475494264",
+  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
+};
+
+let fbApp = null;
+let fbDb = null;
+let fbReady = false;
+let fbUnsub = null;
+let lastRemoteTs = 0;
+let isApplyingRemote = false;
+let saveTimer = null;
+
+function initFirestore(){
+  try{
+    if(!window.firebase || !window.firebase.initializeApp || !window.firebase.firestore) return;
+    fbApp = window.firebase.apps && window.firebase.apps.length ? window.firebase.apps[0] : window.firebase.initializeApp(FIREBASE_CONFIG);
+    fbDb  = window.firebase.firestore();
+    fbReady = true;
+
+    const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+
+    // subscribe
+    if(fbUnsub) try{ fbUnsub(); }catch(_){}
+    fbUnsub = ref.onSnapshot((snap)=>{
+      if(!snap.exists) return;
+      const data = snap.data() || {};
+      const ts = (data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0);
+      if(!ts || ts <= lastRemoteTs) return;
+      lastRemoteTs = ts;
+
+      const remoteState = data.state;
+      if(!remoteState) return;
+
+      try{
+        const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
+        if(!parsed || parsed.version != STATE_VERSION) return;
+
+        // only apply if remote is newer than local
+        const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
+        if(ts <= localTs) return;
+
+        isApplyingRemote = true;
+        state = parsed;
+        if(!state._meta) state._meta = {};
+        state._meta.updatedAt = ts;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        // re-render current screen
+        try{ render(); }catch(_){}
+      }catch(e){}
+      finally{
+        isApplyingRemote = false;
+      }
+    });
+  }catch(e){
+    fbReady = false;
+  }
 }
 
+initFirestore();
+
+function queueSaveToFirestore(){
+  if(!fbReady) return;
+  if(saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(async ()=>{
+    try{
+      const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+      const now = Date.now();
+      // don't upload while applying remote snapshot
+      if(isApplyingRemote) return;
+      const payload = {
+        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAtMs: now,
+        state: JSON.stringify(state)
+      };
+      await ref.set(payload, {merge:true});
+      // keep local meta in sync (ms is fine for comparison)
+      if(!state._meta) state._meta = {};
+      state._meta.updatedAt = now;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }catch(e){
+      // ignore
+    }
+  }, 400);
+}
+
+function saveState(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  // live sync (if enabled)
+  try{ queueSaveToFirestore(); }catch(_){}
+}
 
 function safeName(obj){
   return (obj && obj.name) ? obj.name : "-";
@@ -676,6 +771,7 @@ function renderObra(root){
         <div class="row" style="gap:8px">
           ${canViewOnly(u) ? "" : `<button class="btn" id="btnHome">Obras</button>`}
           <button class="btn" id="btnDash2">Visão Geral</button>
+          <button class="btn btn--accent" id="btnPDF">Gerar PDF</button>
         </div>
       </div>
 
@@ -696,6 +792,8 @@ function renderObra(root){
   if($("#btnHome")) $("#btnHome").onclick = ()=> goto("home");
   $("#btnDash2").onclick = ()=> goto("dash");
 
+  $("#btnPDF").onclick = ()=> generateObraPDF(obraId);
+
   const blockArea = $("#blockArea");
   $$('#blockPills .pill').forEach(p=>{
     p.onclick = ()=>{
@@ -706,6 +804,170 @@ function renderObra(root){
     };
   });
 }
+
+
+function obraCounts(obra){
+  let pend=0, agu=0, conc=0;
+  const blocks=Object.values(obra.blocks||{});
+  blocks.forEach(b=>{
+    const apts=Object.values(b.apartments||{});
+    apts.forEach(a=>{
+      (a.pendencias||[]).forEach(p=>{
+        const s=String(p.state||"pendente").toLowerCase();
+        if(s==="feito") agu++;
+        else if(s==="conferido"||s==="concluido"||s==="aprovado") conc++;
+        else pend++; // pendente ou reprovado
+      });
+    });
+  });
+  return {pend, agu, conc};
+}
+
+function statusLabel(p){
+  const s = String(p.state||"pendente").toLowerCase();
+  if(s==="pendente") return "PENDENTE";
+  if(s==="feito") return "FEITO (aguardando aprovação)";
+  if(s==="conferido" || s==="concluido" || s==="aprovado") return "CONCLUÍDO";
+  if(s==="reprovado") return "REPROVADO";
+  return s.toUpperCase();
+}
+function sortBlockIds(ids){
+  return ids.slice().sort((a,b)=>{
+    const na = parseInt(String(a).replace(/\D/g,""))||0;
+    const nb = parseInt(String(b).replace(/\D/g,""))||0;
+    return na-nb;
+  });
+}
+function sortAptNums(nums){
+  return nums.slice().sort((a,b)=>(parseInt(a)||0)-(parseInt(b)||0));
+}
+function nowBR(){
+  try{
+    return new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+  }catch(e){
+    return new Date().toLocaleString("pt-BR");
+  }
+}
+function countStatusBuckets(obra){
+  let pend=0, aguard=0, concl=0;
+  const blocks = Object.values(obra.blocks||{});
+  blocks.forEach(bl=>{
+    Object.values(bl.apartments||{}).forEach(ap=>{
+      (ap.pendencias||[]).forEach(p=>{
+        const s=String(p.state||'pendente').toLowerCase();
+        if(s==='feito') aguard++;
+        else if(s==='conferido' || s==='concluido' || s==='aprovado') concl++;
+        else pend++; // pendente ou reprovado
+      });
+    });
+  });
+  return {pend, aguard, concl};
+}
+
+function generateObraPDF(obraId){
+  const obra = state.obras[obraId];
+  if(!obra){ toast("Obra não encontrada"); return; }
+  // Ensure jsPDF loaded
+  const jspdf = (window.jspdf && window.jspdf.jsPDF) ? window.jspdf : (window.jspdf || null);
+  const JsPDF = window.jspdf?.jsPDF || window.jspdf?.jsPDF || window.jspdf?.jsPDF || (window.jspdf && window.jspdf.jsPDF);
+  const PDF = JsPDF || (window.jspdf && window.jspdf.jsPDF) || (window.jspdf && window.jspdf.default);
+  if(!PDF){
+    toast("Biblioteca PDF não carregou. Verifique internet e recarregue.");
+    return;
+  }
+  const doc = new PDF({ unit:"pt", format:"a4" });
+  const margin = 40;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  let y = margin;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(14);
+  doc.text(`RELATÓRIO DE PENDÊNCIAS — ${obra.name}`, margin, y);
+  y += 20;
+
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+  doc.text(`Gerado em: ${nowBR()}`, margin, y);
+  y += 18;
+  const c = obraCounts(obra);
+  doc.setFontSize(10);
+  doc.text(`Resumo da obra: ${c.pend} pendentes • ${c.agu} aguardando aprovação • ${c.conc} concluídos`, margin, y);
+  y += 18;
+
+  const blocks = sortBlockIds(Object.keys(obra.blocks||{}));
+  doc.setFontSize(11);
+
+  const lineGap = 14;
+  const sectionGap = 10;
+
+  function ensureSpace(extra){
+    if(y + extra > pageH - margin){
+      doc.addPage();
+      y = margin;
+    }
+  }
+
+  let any = false;
+
+  blocks.forEach(bid=>{
+    const block = obra.blocks[bid];
+    const aptNums = sortAptNums(Object.keys(block.apartments||{}));
+    // collect apartments with pendencias
+    const aptsWith = aptNums.filter(an=>{
+      const a = block.apartments[an];
+      return (a?.pendencias||[]).length>0;
+    });
+    if(aptsWith.length===0) return;
+
+    any = true;
+    ensureSpace(24);
+    doc.setFont("helvetica","bold");
+    doc.text(`${bid.replace("B","Bloco ")}`, margin, y);
+    y += 16;
+    doc.setFont("helvetica","normal");
+
+    aptsWith.forEach(an=>{
+      const a = block.apartments[an];
+      const pend = a.pendencias||[];
+      if(pend.length===0) return;
+      ensureSpace(20);
+      doc.setFont("helvetica","bold");
+      doc.text(`Apto ${an}`, margin+10, y);
+      y += 14;
+      doc.setFont("helvetica","normal");
+
+      pend.forEach(p=>{
+        const label = statusLabel(p);
+        const title = (p.title||"").trim();
+        const loc = (p.location||"").trim();
+        const text = `• [${label}] ${title}${loc ? " — " + loc : ""}`;
+        const maxW = pageW - margin*2 - 20;
+        const lines = doc.splitTextToSize(text, maxW);
+        lines.forEach((ln,i)=>{
+          ensureSpace(lineGap);
+          doc.text(ln, margin+20, y);
+          y += lineGap;
+        });
+      });
+
+      y += sectionGap;
+    });
+
+    y += sectionGap;
+  });
+
+  if(!any){
+    doc.setFont("helvetica","normal");
+    doc.setFontSize(11);
+    doc.text("Nenhum apartamento com pendência no momento.", margin, y);
+  }
+
+  const safeName = slugify(obra.name||obraId).replace(/-/g,"_") || obraId;
+  const ts = new Date().toISOString().slice(0,16).replace(/[:T]/g,"");
+  doc.save(`relatorio_${safeName}_${ts}.pdf`);
+}
+
 
 function renderBlock(container, obraId, blockId){
   const obra = state.obras[obraId];
@@ -790,12 +1052,6 @@ function renderApto(root){
         </div>
 
         <div class="hr"></div>
-        ${(apt.photos && apt.photos.length) ? `<div class="small"><b>Fotos do apartamento</b></div>
-        <div class="thumbs" id="aptThumbs">
-          ${apt.photos.map(ph=>`<img class="thumb" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
-        </div>
-        <div class="hr"></div>` : ``}
-
         <div id="pendList" class="grid"></div>
       </div>
 
@@ -813,7 +1069,6 @@ function renderApto(root){
   `;
 
   const aptThumbs = $("#aptThumbs");
-  if(aptThumbs){ $$("img.thumb", aptThumbs).forEach(img=> img.onclick = ()=> openPhotoViewer(img.getAttribute("src"))); }
 
   const btnAptFoto = $("#btnAddAptFoto");
   if(btnAptFoto){
@@ -832,7 +1087,7 @@ function renderApto(root){
           saveState();
           toast("Foto do apto adicionada.");
           render();
-          openPhotoViewer(dataUrl);
+          toast('Fotos desativadas nesta versão.');
         }catch(e){ console.error(e); toast("Falha ao adicionar foto."); }
       };
       input.click();
@@ -883,8 +1138,7 @@ function renderPendencias(container, obraId, blockId, apto){
             const canEditMine = (canCreate(u) && mine);
             const btns = [];
             if(canEditMine){
-              btns.push(`<button class="btn btn--ghost" data-act="edit" data-id="${p.id}">Editar</button>`);
-              btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
+                            btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
             }
             return btns.join("");
           })()}
@@ -896,43 +1150,29 @@ function renderPendencias(container, obraId, blockId, apto){
           <b>Histórico</b><br>
           ${(()=>{
             const lines = [];
-            // compat (campos antigos)
-            if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
-            if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
-            if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
-            if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
-            // eventos acumulados
             if(p.events && p.events.length){
               p.events.forEach(ev=>lines.push(fmtEvent(ev)));
+            }else{
+              if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
+              if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
+              if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
+              if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
             }
-            // remove duplicados simples
             return lines.join("<br>");
           })()}
         </div>
-
-        ${(p.photos && p.photos.length) ? `<div class="hr" style="margin:10px 0"></div>
-          <div class="small"><b>Fotos</b></div>
-          <div class="thumbs">
-            ${p.photos.map(ph=>`<img class="thumb" data-ph="${esc(ph.id)}" data-pid="${esc(p.id)}" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
-          </div>` : ``}
-
-
         <div class="row" style="gap:8px; flex-wrap:wrap; justify-content:flex-end">
           ${canDo ? `<button class="btn btn--orange" data-act="feito" data-id="${esc(p.id)}">Marcar FEITO</button>` : ``}
           ${canApprove ? `<button class="btn btn--green" data-act="aprovar" data-id="${esc(p.id)}">Aprovar</button>
                           <button class="btn btn--red" data-act="reprovar" data-id="${esc(p.id)}">Reprovar</button>` : ``}
           ${canReopenP ? `<button class="btn" data-act="reabrir" data-id="${esc(p.id)}">Reabrir</button>` : ``}
-          ${canCreate(u) ? `<button class="btn" data-act="foto" data-id="${esc(p.id)}">Adicionar foto</button>` : ``}
+          
         </div>
 
-        ${p.rejection?.note ? `<div class="small" style="margin-top:8px"><b>Reprovação:</b> ${esc(p.rejection.note)} <span class="small">(${fmtDT(p.rejection.at)} • ${esc((p.rejection.by && p.rejection.by.name) || "-")})</span></div>` : ``}
+        ${(p.state==='reprovado' && p.rejection?.note) ? `<div class="small" style="margin-top:8px"><b>Reprovação:</b> ${esc(p.rejection.note)} <span class="small">(${fmtDT(p.rejection.at)} • ${esc((p.rejection.by && p.rejection.by.name) || "-")})</span></div>` : ``}
       </div>
     `;
   }).join("");
-
-  $$("img.thumb", container).forEach(img=>{
-    img.onclick = ()=>{ openPhotoViewer(img.getAttribute("src")); };
-  });
 
   $$("button[data-act]", container).forEach(btn=>{
     btn.onclick = ()=>{
@@ -942,18 +1182,7 @@ function renderPendencias(container, obraId, blockId, apto){
       if(act==="aprovar") return actAprovar(obraId, blockId, apto, id);
       if(act==="reprovar") return actReprovar(obraId, blockId, apto, id);
       if(act==="reabrir") return actReabrir(obraId, blockId, apto, id);
-      if(act==="foto") return actAddFotoPend(obraId, blockId, apto, id);
-      if(act==="edit") return actEditPend(obraId, blockId, apto, id);
       if(act==="del") return actDeletePend(obraId, blockId, apto, id);
-    };
-  });
-
-  $$("button.photoDel", container).forEach(btn=>{
-    btn.onclick = (e)=>{
-      e.stopPropagation();
-      const pid = btn.getAttribute("data-pend");
-      const phid = btn.getAttribute("data-phdel");
-      actDeletePhoto(obraId, blockId, apto, pid, phid);
     };
   });
 }
@@ -984,9 +1213,13 @@ function actFeito(obraId, blockId, apto, pendId){
     render();
     return;
   }
-  p.state = "feito";
+  p.state = 'feito';
   p.doneAt = new Date().toISOString();
   p.doneBy = { id:u.id, name:u.name, role:u.role };
+  // se veio de reprovação, limpa conferência anterior e motivo para voltar ao fluxo
+  p.reviewedAt = null;
+  p.reviewedBy = null;
+  p.rejection = null;
   pushEvent(p, "feito", u);
   saveState();
   toast("Marcado como FEITO.");
@@ -1038,58 +1271,6 @@ function actReabrir(obraId, blockId, apto, pendId){
 }
 
 
-async function actAddFotoPend(obraId, blockId, apto, pendId){
-  const u = currentUser();
-  if(!canCreate(u)){ toast("Sem permissão."); return; }
-  // file picker
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "image/*";
-  input.capture = "environment";
-  input.onchange = async ()=>{
-    const file = input.files && input.files[0];
-    if(!file) return;
-    // basic size guard (~1.5MB)
-    if(file.size > 1_500_000){
-      toast("Foto muito pesada. Tente uma menor.");
-      return;
-    }
-    try{
-      const dataUrl = await readImageAsDataURL(file);
-      const { p } = findPend(obraId, blockId, apto, pendId);
-      if(!p) return;
-      p.photos = p.photos || [];
-      p.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name, role:u.role } });
-      pushEvent(p, "foto_add", u);
-      saveState();
-      toast("Foto adicionada.");
-      render();
-      // open viewer for last photo
-      openPhotoViewer(dataUrl);
-    }catch(e){
-      console.error(e);
-      toast("Falha ao adicionar foto.");
-    }
-  };
-  input.click();
-function actEditPend(obraId, blockId, apto, pendId){
-  const u = currentUser();
-  if(!canCreate(u)){ toast("Sem permissão."); return; }
-  const { p } = findPend(obraId, blockId, apto, pendId);
-  if(!p) return;
-  if(!(p.createdBy && u && p.createdBy.id===u.id)){ toast("Você só pode editar o que você criou."); return; }
-  const title = prompt("Editar pendência:", p.title || "") || "";
-  if(!title.trim()) return;
-  const category = prompt("Categoria:", p.category || "") || "";
-  const location = prompt("Local:", p.location || "") || "";
-  p.title = title.trim();
-  p.category = category.trim();
-  p.location = location.trim();
-  pushEvent(p, "editado", u);
-  saveState();
-  toast("Atualizado.");
-  render();
-}
 
 function actDeletePend(obraId, blockId, apto, pendId){
   const u = currentUser();
@@ -1108,41 +1289,7 @@ function actDeletePend(obraId, blockId, apto, pendId){
   render();
 }
 
-function actDeletePhoto(obraId, blockId, apto, pendId, photoId){
-  const u = currentUser();
-  if(!canCreate(u)){ toast("Sem permissão."); return; }
-  const { p } = findPend(obraId, blockId, apto, pendId);
-  if(!p || !p.photos) return;
-  const ph = p.photos.find(x=>x.id===photoId);
-  if(!ph) return;
-  if(!(ph.addedBy && u && ph.addedBy.id===u.id)){ toast("Você só pode apagar a foto que você adicionou."); return; }
-  if(!confirm("Apagar esta foto?")) return;
-  p.photos = p.photos.filter(x=>x.id!==photoId);
-  pushEvent(p, "foto_del", u);
-  saveState();
-  toast("Foto apagada.");
-  render();
-}
 
-
-}
-
-function openPhotoViewer(src, meta){
-  const { backdrop, close } = openModal(`
-    <div class="modal">
-      <div class="row">
-        <div>
-          <div class="h2">Foto</div>
-          <div class="small">Toque fora para fechar</div>
-        </div>
-        <button class="btn btn--ghost" id="mClose">✕</button>
-      </div>
-      <div class="hr"></div>
-      <img src="${esc(dataUrl)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
-    </div>
-  `);
-  $("#mClose", backdrop).onclick = close;
-}
 
 function openAddPendencia(obraId, blockId, apto){
   const u = currentUser();
@@ -1329,7 +1476,7 @@ function renderUsers(root){
           <div class="grid" style="grid-template-columns:1fr 1fr; gap:10px">
             <div>
               <div class="small">Usuário</div>
-              <input id="execUser" class="input" placeholder="Ex.: costa_rica" />
+              <input id="execUser" class="input" placeholder="Ex.: exec_costa_rica" />
             </div>
             <div>
               <div class="small">PIN (4 dígitos)</div>
@@ -1511,6 +1658,60 @@ function renderSettings(root){
 
 
 
+
+function canDeletePend(p){
+  const u = currentUser();
+  if(!u) return false;
+  if(u.role === "supervisor") return true;
+  if(u.role === "qualidade") return true;
+  return (p && p.criadoPor && p.criadoPor.id === u.id);
+}
+
+function actDel(id){
+  try{
+    if(!view || view.type !== "apt") return;
+    const obra = getObraById(view.obraId);
+    const apt  = obra && findApt(obra, view.bloco, view.apto);
+    if(!apt || !apt.pendencias) return;
+    const p = apt.pendencias.find(x=>x.id===id);
+    if(!p) return;
+    if(!canDeletePend(p)){
+      toast("Sem permissão para apagar.");
+      return;
+    }
+    if(!confirm("Apagar esta pendência?")) return;
+    apt.pendencias = apt.pendencias.filter(x=>x.id!==id);
+    saveState();
+    render();
+    toast("Pendência apagada.");
+  }catch(e){
+    toast("Falha ao apagar.");
+  }
+}
+
+function actDelPhoto(pId, photoId){
+  try{
+    if(!view || view.type !== "apt") return;
+    const obra = getObraById(view.obraId);
+    const apt  = obra && findApt(obra, view.bloco, view.apto);
+    if(!apt || !apt.pendencias) return;
+    const p = apt.pendencias.find(x=>x.id===pId);
+    if(!p || !p.fotos) return;
+    if(!canDeletePend(p)){
+      toast("Sem permissão para apagar foto.");
+      return;
+    }
+    if(!confirm("Apagar esta foto?")) return;
+    p.fotos = p.fotos.filter(f=>f.id!==photoId);
+    saveState();
+    render();
+    toast("Foto apagada.");
+  }catch(e){
+    toast("Falha ao apagar foto.");
+  }
+}
+
+
 // V33: Delegação de cliques para botões (Editar/Apagar/Foto/Feito/Aprovar/Reprovar/Reabrir)
 document.addEventListener("click", function(e){
   const t = e.target;
@@ -1543,7 +1744,7 @@ document.addEventListener("click", function(e){
     const blockId = (typeof nav!=="undefined" && nav.params) ? nav.params.blockId : null;
     const apto = (typeof nav!=="undefined" && nav.params) ? nav.params.apto : null;
     if(!obraId || !blockId || !apto || !pid || !phid){
-      return openPhotoViewer(t.getAttribute("src"));
+      return toast('Fotos desativadas nesta versão.');
     }
     const u = currentUser();
     try{
@@ -1551,12 +1752,9 @@ document.addEventListener("click", function(e){
       const p = (apt.pendencias||[]).find(x=>x.id===pid);
       const photo = (p && p.photos ? p.photos.find(x=>x.id===phid) : null);
       const mine = !!(photo && u && photo.addedBy && photo.addedBy.id===u.id);
-      openPhotoViewer(photo ? photo.dataUrl : t.getAttribute("src"), {
-        canDelete: mine && (u.role==="qualidade" || u.role==="supervisor"),
-        onDelete: ()=> actDeletePhoto(obraId, blockId, apto, pid, phid)
-      });
+      toast('Fotos desativadas nesta versão.');
     }catch(err){
-      openPhotoViewer(t.getAttribute("src"));
+      toast('Fotos desativadas nesta versão.');
     }
   }
 });
