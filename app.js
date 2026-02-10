@@ -44,6 +44,33 @@ function firebaseInit(){
     }
     _db = firebase.firestore();
     _appDoc = _db.collection("apps").doc("bela_mares_checklist");
+
+// Migração/recuperação: algumas versões antigas salvaram o estado em outro caminho (legacy).
+// Se o legacy tiver mais pendências do que o doc atual, adotamos/mesclamos o legacy para não perder dados.
+try{
+  const legacyRef = _db.collection("bela_mares_checklist").doc("state");
+  const [curSnap, legacySnap] = await Promise.all([_appDoc.get(), legacyRef.get()]);
+  const curState = (curSnap.exists && curSnap.data() && curSnap.data().state) ? curSnap.data().state : null;
+  const legacyData = legacySnap.exists ? (legacySnap.data()||{}) : null;
+  const legacyState = legacyData ? ( (legacyData.state && typeof legacyData.state === "object") ? legacyData.state : legacyData ) : null;
+
+  if(legacyState){
+    const curCount = countPendencias(curState||{});
+    const legacyCount = countPendencias(legacyState||{});
+    if(legacyCount > curCount){
+      // Mescla mantendo o mais completo
+      const merged = mergeRemoteIntoLocal(stripLocalOnly(legacyState), curState||{});
+      await _appDoc.set({
+        state: merged,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        migratedFrom: "legacy"
+      }, { merge: true });
+    }
+  }
+}catch(e){
+  console.warn("Falha na migração legacy:", e);
+}
+
     _fbReady = true;
     return true;
   }catch(e){
@@ -58,6 +85,25 @@ function stripLocalOnly(s){
   delete clone.session;
   return clone;
 }
+
+function countPendencias(s){
+  try{
+    let n=0;
+    const obras = (((s||{}).obras)||{});
+    Object.values(obras).forEach(obra=>{
+      const blocks=(obra||{}).blocks||{};
+      Object.values(blocks).forEach(b=>{
+        const apts=(b||{}).apartments||{};
+        Object.values(apts).forEach(ap=>{
+          const arr=(ap||{}).pendencias||[];
+          if(Array.isArray(arr)) n += arr.length;
+        });
+      });
+    });
+    return n;
+  }catch(e){ return 0; }
+}
+
 
 async function syncPullOnce(){
   if(!_fbReady || !_appDoc) return;
@@ -86,7 +132,7 @@ async function syncPullOnce(){
   }
 }
 
-function syncStartRealtime(){
+async function syncStartRealtime(){
   if(!_fbReady || !_appDoc) return;
   try{
     if(_unsubRealtime) _unsubRealtime();
