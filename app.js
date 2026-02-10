@@ -1,178 +1,19 @@
-const APP_VERSION = "classic-v34";
+const APP_VERSION = "pdf-v2";
+const STATE_VERSION = 26;
 
 /* Bela Mares — Checklist (v19) */
 /* Sem Service Worker para evitar cache travado em testes. */
 
 const STORAGE_KEY = "bm_checklist_classic_v1";
 
-
-const SESSION_KEY = STORAGE_KEY + "_session_v1";
-
-// ---- Sessão é LOCAL por aparelho (não sincroniza). Isso evita "login único" em vários dispositivos.
-function loadSession(){
-  try{ return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); }catch(e){ return null; }
+const SESSION_KEY = "bm_checklist_session_user";
+function getSessionUserId(){
+  try{ return (localStorage.getItem(SESSION_KEY)||"").trim().toLowerCase(); }catch(e){ return ""; }
 }
-function saveSession(sess){
-  try{
-    if(sess) localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
-    else localStorage.removeItem(SESSION_KEY);
+function setSessionUserId(id){
+  try{ if(!id){ localStorage.removeItem(SESSION_KEY); return; }
+    localStorage.setItem(SESSION_KEY, String(id).trim().toLowerCase());
   }catch(e){}
-}
-
-// ---- Firebase (Firestore) sync (opcional). Mantém dados ao vivo entre PC e celular.
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
-  authDomain: "bela-mares-entregas.firebaseapp.com",
-  projectId: "bela-mares-entregas",
-  storageBucket: "bela-mares-entregas.firebasestorage.app",
-  messagingSenderId: "159475494264",
-  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
-};
-
-let _fbReady = false;
-let _db = null;
-let _appDoc = null;
-let _unsubRealtime = null;
-let _remoteWriteTimer = null;
-let _applyingRemote = false;
-
-function firebaseInit(){
-  try{
-    if(typeof firebase === "undefined") return false;
-    if(!firebase.apps || !firebase.apps.length){
-      firebase.initializeApp(FIREBASE_CONFIG);
-    }
-    _db = firebase.firestore();
-    _appDoc = _db.collection("apps").doc("bela_mares_checklist");
-
-// Migração/recuperação: algumas versões antigas salvaram o estado em outro caminho (legacy).
-// Se o legacy tiver mais pendências do que o doc atual, adotamos/mesclamos o legacy para não perder dados.
-try{
-  const legacyRef = _db.collection("bela_mares_checklist").doc("state");
-  const [curSnap, legacySnap] = await Promise.all([_appDoc.get(), legacyRef.get()]);
-  const curState = (curSnap.exists && curSnap.data() && curSnap.data().state) ? curSnap.data().state : null;
-  const legacyData = legacySnap.exists ? (legacySnap.data()||{}) : null;
-  const legacyState = legacyData ? ( (legacyData.state && typeof legacyData.state === "object") ? legacyData.state : legacyData ) : null;
-
-  if(legacyState){
-    const curCount = countPendencias(curState||{});
-    const legacyCount = countPendencias(legacyState||{});
-    if(legacyCount > curCount){
-      // Mescla mantendo o mais completo
-      const merged = mergeRemoteIntoLocal(stripLocalOnly(legacyState), curState||{});
-      await _appDoc.set({
-        state: merged,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        migratedFrom: "legacy"
-      }, { merge: true });
-    }
-  }
-}catch(e){
-  console.warn("Falha na migração legacy:", e);
-}
-
-    _fbReady = true;
-    return true;
-  }catch(e){
-    console.warn("Firebase init falhou:", e);
-    return false;
-  }
-}
-
-function stripLocalOnly(s){
-  // clone simples e remove sessão
-  const clone = JSON.parse(JSON.stringify(s || {}));
-  delete clone.session;
-  return clone;
-}
-
-function countPendencias(s){
-  try{
-    let n=0;
-    const obras = (((s||{}).obras)||{});
-    Object.values(obras).forEach(obra=>{
-      const blocks=(obra||{}).blocks||{};
-      Object.values(blocks).forEach(b=>{
-        const apts=(b||{}).apartments||{};
-        Object.values(apts).forEach(ap=>{
-          const arr=(ap||{}).pendencias||[];
-          if(Array.isArray(arr)) n += arr.length;
-        });
-      });
-    });
-    return n;
-  }catch(e){ return 0; }
-}
-
-
-async function syncPullOnce(){
-  if(!_fbReady || !_appDoc) return;
-  try{
-    const snap = await _appDoc.get();
-    if(!snap.exists) return;
-
-    const data = snap.data() || {};
-    const remote = (data && data.state) ? data.state : data;
-    if(!remote || typeof remote !== "object") return;
-
-    // preserva sessão local
-    const localSess = state && state.session ? state.session : loadSession();
-    _applyingRemote = true;
-    state = remote;
-    state.session = localSess || null;
-
-    // salva local (sem empurrar pro remoto agora)
-    saveState(true);
-
-    // re-render se já existir router/render
-    try{ if(typeof render === "function") render(); }catch(e){}
-    _applyingRemote = false;
-  }catch(e){
-    console.warn("syncPullOnce falhou:", e);
-  }
-}
-
-async function syncStartRealtime(){
-  if(!_fbReady || !_appDoc) return;
-  try{
-    if(_unsubRealtime) _unsubRealtime();
-    _unsubRealtime = _appDoc.onSnapshot((snap)=>{
-      try{
-        if(!snap.exists) return;
-        const data = snap.data() || {};
-        const remote = (data && data.state) ? data.state : data;
-        if(!remote || typeof remote !== "object") return;
-
-        // Não sobrescreve a sessão local
-        const localSess = state && state.session ? state.session : loadSession();
-
-        // evita loop: se o update veio da nossa própria escrita muito recente, ainda assim aceitamos,
-        // mas preservando sessão.
-        _applyingRemote = true;
-        state = remote;
-        state.session = localSess || null;
-        saveState(true);
-        try{ if(typeof render === "function") render(); }catch(e){}
-        _applyingRemote = false;
-      }catch(e){ console.warn("snapshot err:", e); }
-    });
-  }catch(e){
-    console.warn("syncStartRealtime falhou:", e);
-  }
-}
-
-function syncQueuePush(){
-  if(!_fbReady || !_appDoc) return;
-  if(_applyingRemote) return; // não faz push durante apply remoto
-  if(_remoteWriteTimer) clearTimeout(_remoteWriteTimer);
-  _remoteWriteTimer = setTimeout(async ()=>{
-    try{
-      const payload = { state: stripLocalOnly(state) };
-      await _appDoc.set(payload, { merge: true });
-    }catch(e){
-      console.warn("sync push falhou:", e);
-    }
-  }, 500);
 }
 
 const $ = (sel, root=document) => root.querySelector(sel);
@@ -295,12 +136,15 @@ function seed(){
 }
 
 function loadState(){
+  // 1) localStorage (fast)  2) Firestore (if configured) will overwrite via listener
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
     if(!raw) return seed();
     const parsed = JSON.parse(raw);
     if(!parsed || !parsed.version) return seed();
-    if(parsed.version !== 19) return seed();
+    if(parsed.version !== STATE_VERSION) return seed();
+    if(parsed && parsed.session) delete parsed.session;
+    if(!parsed._meta) parsed._meta = {};
     return parsed;
   }catch(e){
     return seed();
@@ -308,26 +152,112 @@ function loadState(){
 }
 let state = loadState();
 
-// Firebase sync (se libs estiverem carregadas no index.html)
-if(firebaseInit()){
-  // primeiro puxa do remoto (para não perder dados existentes)
-  syncPullOnce().then(()=>{ syncStartRealtime(); });
-}
+// ---- Firestore (live sync) ----
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
+  authDomain: "bela-mares-entregas.firebaseapp.com",
+  projectId: "bela-mares-entregas",
+  storageBucket: "bela-mares-entregas.firebasestorage.app",
+  messagingSenderId: "159475494264",
+  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
+};
 
+let fbApp = null;
+let fbDb = null;
+let fbReady = false;
+let fbUnsub = null;
+let lastRemoteTs = 0;
+let isApplyingRemote = false;
+let saveTimer = null;
 
-function saveState(localOnly=false){
+function initFirestore(){
   try{
-    // salva sessão separada (local)
-    saveSession(state && state.session ? state.session : null);
+    if(!window.firebase || !window.firebase.initializeApp || !window.firebase.firestore) return;
+    fbApp = window.firebase.apps && window.firebase.apps.length ? window.firebase.apps[0] : window.firebase.initializeApp(FIREBASE_CONFIG);
+    fbDb  = window.firebase.firestore();
+    fbReady = true;
 
-    // salva estado (sem sessão) no localStorage
-    const toStore = stripLocalOnly(state);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
-  }catch(e){}
+    const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
 
-  // empurra pro Firestore (se habilitado) - exceto quando estamos aplicando remoto ou explicitamente localOnly
-  if(!localOnly) syncQueuePush();
+    // subscribe
+    if(fbUnsub) try{ fbUnsub(); }catch(_){}
+    fbUnsub = ref.onSnapshot((snap)=>{
+      if(!snap.exists) return;
+      const data = snap.data() || {};
+      const ts = (data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0);
+      if(!ts || ts <= lastRemoteTs) return;
+      lastRemoteTs = ts;
+
+      const remoteState = data.state;
+      if(!remoteState) return;
+
+      try{
+        const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
+        if(!parsed || parsed.version != STATE_VERSION) return;
+
+        // only apply if remote is newer than local
+        const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
+        if(ts <= localTs) return;
+
+        isApplyingRemote = true;
+        if(parsed && parsed.session) delete parsed.session;
+        state = parsed;
+        if(!state._meta) state._meta = {};
+        state._meta.updatedAt = ts;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(pstate || persistableState()));
+        // re-render current screen
+        try{ render(); }catch(_){}
+      }catch(e){}
+      finally{
+        isApplyingRemote = false;
+      }
+    });
+  }catch(e){
+    fbReady = false;
+  }
 }
+
+initFirestore();
+
+function queueSaveToFirestore(pstate){
+  if(!fbReady) return;
+  if(saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(async ()=>{
+    try{
+      const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+      const now = Date.now();
+      // don't upload while applying remote snapshot
+      if(isApplyingRemote) return;
+      const payload = {
+        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAtMs: now,
+        state: JSON.stringify(pstate || persistableState())
+      };
+      await ref.set(payload, {merge:true});
+      // keep local meta in sync (ms is fine for comparison)
+      if(!state._meta) state._meta = {};
+      state._meta.updatedAt = now;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(pstate || persistableState()));
+    }catch(e){
+      // ignore
+    }
+  }, 400);
+}
+
+function persistableState(){
+  // Never persist session globally; session is per-device (SESSION_KEY)
+  const copy = JSON.parse(JSON.stringify(state));
+  if(copy && copy.session) delete copy.session;
+  return copy;
+}
+
+function saveState(){
+  const pstate = persistableState();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(pstate));
+  // live sync (if enabled)
+  try{ queueSaveToFirestore(pstate); }catch(_){ }
+}
+
 function safeName(obj){
   return (obj && obj.name) ? obj.name : "-";
 }
@@ -363,9 +293,9 @@ function fmtEvent(ev){
 }
 
 function currentUser(){
-  const sid = state.session?.userId;
+  const sid = getSessionUserId();
   if(!sid) return null;
-  return state.users.find(u=>u.id===sid && u.active) || null;
+  return state.users.find(u=>String(u.id).toLowerCase()===sid && u.active) || null;
 }
 
 function canViewOnly(u){
@@ -447,8 +377,7 @@ function setTopbar(){
   settingsBtn.onclick = ()=>{ goto("settings"); };
 
   logout.onclick = ()=>{
-    state.session = null;
-    saveState();
+    setSessionUserId("");
     goto("login");
   };
 }
@@ -480,6 +409,31 @@ function aptStatus(apto){
   if(hasPend) return { label:"Com pendência", dot:"r" };
   if(hasAguard) return { label:"Aguardando conferência", dot:"o" };
   return { label:"Sem pendências", dot:"" };
+}
+
+function blockDots(block){
+  const apts = Object.values(block?.apartments||{});
+  if(apts.length===0) return "";
+  const cats = apts.map(a=>{
+    const st = aptStatus(a);
+    if(st.dot==="g") return "g";
+    if(st.dot==="o") return "o";
+    if(st.dot==="r") return "r";
+    return ""; // sem registros/sem pendências
+  });
+
+  const nonEmpty = cats.filter(x=>x);
+  if(nonEmpty.length===0) return "";
+
+  const allSame = nonEmpty.every(x=>x===nonEmpty[0]) && nonEmpty.length===cats.length;
+  if(allSame){
+    const d = nonEmpty[0];
+    return `<span class="dot dot--${d}" style="margin-left:8px"></span>`;
+  }
+
+  const set = new Set(nonEmpty);
+  const order = ["r","o","g"]; // pendente, aguardando, concluído
+  return order.filter(x=>set.has(x)).map(d=>`<span class="dot dot--${d}" style="margin-left:6px"></span>`).join("");
 }
 
 function render(){
@@ -562,8 +516,7 @@ function renderLogin(root){
     const user = state.users.find(u=>u.id===id && u.active);
     if(!user){ toast("Usuário inválido"); return; }
     if(user.pin !== pin){ toast("PIN incorreto"); return; }
-    state.session = { userId: user.id };
-    saveState();
+    setSessionUserId(user.id);
     // route
     if(user.role==="execucao"){
       const obraId = (user.obraIds||[])[0];
@@ -861,13 +814,14 @@ function renderObra(root){
         <div class="row" style="gap:8px">
           ${canViewOnly(u) ? "" : `<button class="btn" id="btnHome">Obras</button>`}
           <button class="btn" id="btnDash2">Visão Geral</button>
+          <button class="btn btn--accent" id="btnPDF">Gerar PDF</button>
         </div>
       </div>
 
       <div class="hr"></div>
       <div class="small">Escolha o bloco:</div>
       <div class="pills" id="blockPills">
-        ${blocks.map(b=>`<div class="pill" data-b="${b}">${b.replace("B","Bloco ")}</div>`).join("")}
+        ${blocks.map(b=>{ const dots = blockDots(obra.blocks[b]); return `<div class="pill" data-b="${b}">${b.replace("B","Bloco ")}${dots}</div>`; }).join("")}
       </div>
     </div>
 
@@ -881,6 +835,8 @@ function renderObra(root){
   if($("#btnHome")) $("#btnHome").onclick = ()=> goto("home");
   $("#btnDash2").onclick = ()=> goto("dash");
 
+  $("#btnPDF").onclick = ()=> generateObraPDF(obraId);
+
   const blockArea = $("#blockArea");
   $$('#blockPills .pill').forEach(p=>{
     p.onclick = ()=>{
@@ -891,6 +847,233 @@ function renderObra(root){
     };
   });
 }
+
+
+function obraCounts(obra){
+  let pend=0, agu=0, conc=0;
+  const blocks=Object.values(obra.blocks||{});
+  blocks.forEach(b=>{
+    const apts=Object.values(b.apartments||{});
+    apts.forEach(a=>{
+      (a.pendencias||[]).forEach(p=>{
+        const s=String(p.state||"pendente").toLowerCase();
+        if(s==="feito") agu++;
+        else if(s==="conferido"||s==="concluido"||s==="aprovado") conc++;
+        else pend++; // pendente ou reprovado
+      });
+    });
+  });
+  return {pend, agu, conc};
+}
+
+function statusLabel(p){
+  const s = String(p.state||"pendente").toLowerCase();
+  if(s==="pendente") return "PENDENTE";
+  if(s==="feito") return "FEITO (aguardando aprovação)";
+  if(s==="conferido" || s==="concluido" || s==="aprovado") return "CONCLUÍDO";
+  if(s==="reprovado") return "REPROVADO";
+  return s.toUpperCase();
+}
+function sortBlockIds(ids){
+  return ids.slice().sort((a,b)=>{
+    const na = parseInt(String(a).replace(/\D/g,""))||0;
+    const nb = parseInt(String(b).replace(/\D/g,""))||0;
+    return na-nb;
+  });
+}
+function sortAptNums(nums){
+  return nums.slice().sort((a,b)=>(parseInt(a)||0)-(parseInt(b)||0));
+}
+function nowBR(){
+  try{
+    return new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+  }catch(e){
+    return new Date().toLocaleString("pt-BR");
+  }
+}
+function countStatusBuckets(obra){
+  let pend=0, aguard=0, concl=0;
+  const blocks = Object.values(obra.blocks||{});
+  blocks.forEach(bl=>{
+    Object.values(bl.apartments||{}).forEach(ap=>{
+      (ap.pendencias||[]).forEach(p=>{
+        const s=String(p.state||'pendente').toLowerCase();
+        if(s==='feito') aguard++;
+        else if(s==='conferido' || s==='concluido' || s==='aprovado') concl++;
+        else pend++; // pendente ou reprovado
+      });
+    });
+  });
+  return {pend, aguard, concl};
+}
+
+function generateObraPDF(obraId){
+  const obra = state.obras[obraId];
+  if(!obra){ toast("Obra não encontrada"); return; }
+
+  const PDF = window.jspdf?.jsPDF || (window.jspdf && window.jspdf.jsPDF) || (window.jspdf && window.jspdf.default);
+  if(!PDF){
+    toast("Biblioteca PDF não carregou. Verifique internet e recarregue.");
+    return;
+  }
+
+  // Contagem por APARTAMENTO (não por item)
+  function aptCategory(apto){
+    const ps = apto?.pendencias || [];
+    if(ps.length===0) return "sem_registros";
+    const hasPend = ps.some(p=>String(p.state||"pendente").toLowerCase()==="pendente" || String(p.state||"").toLowerCase()==="reprovado");
+    if(hasPend) return "pendente";
+    const hasFeito = ps.some(p=>String(p.state||"").toLowerCase()==="feito");
+    if(hasFeito) return "aguardando";
+    return "concluido"; // todas conferidas/aprovadas
+  }
+
+  function obraAptCounts(obra){
+    let pend=0, agu=0, conc=0, sem=0;
+    const blocks = Object.values(obra.blocks||{});
+    blocks.forEach(b=>{
+      const apts = Object.values(b.apartments||{});
+      apts.forEach(a=>{
+        const cat = aptCategory(a);
+        if(cat==="pendente") pend++;
+        else if(cat==="aguardando") agu++;
+        else if(cat==="concluido") conc++;
+        else sem++;
+      });
+    });
+    return {pend, agu, conc, sem};
+  }
+
+  // Ordenação de locais dentro do apto
+  const LOC_ORDER = ["varanda","sala","quarto 1","quarto1","quarto 2","quarto2","banheiro","cozinha","área de serviço","area de serviço","area de servico","área de servico"];
+  function locRank(loc){
+    const s = String(loc||"").trim().toLowerCase();
+    if(!s) return 999;
+    // normaliza alguns
+    const norm = s.replace(/\s+/g," ").replace("á","a").replace("ã","a").replace("ç","c");
+    const map = {
+      "quarto1":"quarto 1",
+      "quarto 01":"quarto 1",
+      "quarto2":"quarto 2",
+      "quarto 02":"quarto 2",
+      "area de servico":"area de serviço",
+      "área de servico":"area de serviço",
+      "area de servico":"area de serviço",
+    };
+    const key = map[norm] || norm;
+    const idx = ["varanda","sala","quarto 1","quarto 2","banheiro","cozinha","area de serviço","área de serviço"].findIndex(x=>x===key);
+    return idx>=0 ? idx : 999;
+  }
+
+  const doc = new PDF({ unit:"pt", format:"a4" });
+  const margin = 40;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+
+  const blocks = sortBlockIds(Object.keys(obra.blocks||{}));
+  const counts = obraAptCounts(obra);
+
+  const safeName = slugify(obra.name||obraId).replace(/-/g,"_") || obraId;
+  const ts = new Date().toISOString().slice(0,16).replace(/[:T]/g,"");
+
+  let firstPage = true;
+
+  blocks.forEach(bid=>{
+    const block = obra.blocks[bid];
+    const aptNums = sortAptNums(Object.keys(block.apartments||{}));
+
+    aptNums.forEach(an=>{
+      const a = block.apartments[an];
+
+      if(!firstPage) doc.addPage();
+      firstPage = false;
+
+      let y = margin;
+
+      // Cabeçalho (no 1º apto inclui título e resumo; nos demais cabeçalho curto)
+      doc.setFont("helvetica", "bold");
+      if(firstPage===false && doc.getNumberOfPages()===1){
+        // (Não usado)
+      }
+      if(doc.getNumberOfPages()===1){
+        doc.setFontSize(14);
+        doc.text(`RELATÓRIO DE PENDÊNCIAS — ${obra.name}`, margin, y);
+        y += 20;
+
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(10);
+        doc.text(`Gerado em: ${nowBR()}`, margin, y);
+        y += 16;
+
+        doc.setFontSize(10);
+        doc.text(`Resumo (apartamentos): ${counts.pend} pendentes • ${counts.agu} aguardando aprovação • ${counts.conc} concluídos • ${counts.sem} sem registros`, margin, y);
+        y += 18;
+      } else {
+        doc.setFontSize(12);
+        doc.text(`${obra.name}`, margin, y);
+        y += 16;
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(10);
+        doc.text(`Gerado em: ${nowBR()}`, margin, y);
+        y += 14;
+      }
+
+      // Identificação do apto (sempre)
+      doc.setFont("helvetica","bold");
+      doc.setFontSize(12);
+      doc.text(`${bid.replace("B","Bloco ")} — Apto ${an}`, margin, y);
+      y += 16;
+      doc.setFont("helvetica","normal");
+      doc.setFontSize(11);
+
+      const pend = (a?.pendencias||[]).slice();
+
+      if(pend.length===0){
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(11);
+        doc.text("Sem registros até o momento.", margin, y);
+        return;
+      }
+
+      // Ordena pendências por local (e mantém estabilidade)
+      pend.sort((p1,p2)=>{
+        const r1 = locRank(p1.location);
+        const r2 = locRank(p2.location);
+        if(r1!==r2) return r1-r2;
+        const l1 = String(p1.location||"").toLowerCase();
+        const l2 = String(p2.location||"").toLowerCase();
+        if(l1!==l2) return l1.localeCompare(l2);
+        const t1 = String(p1.title||"").toLowerCase();
+        const t2 = String(p2.title||"").toLowerCase();
+        return t1.localeCompare(t2);
+      });
+
+      const lineGap = 14;
+
+      pend.forEach(p=>{
+        const label = statusLabel(p);
+        const title = (p.title||"").trim();
+        const loc = (p.location||"").trim();
+        const text = `• [${label}] ${title}${loc ? " — " + loc : ""}`;
+        const maxW = pageW - margin*2;
+        const lines = doc.splitTextToSize(text, maxW);
+        lines.forEach(ln=>{
+          if(y + lineGap > pageH - margin){
+            // não deve acontecer muito, mas garante
+            doc.addPage();
+            y = margin;
+          }
+          doc.text(ln, margin, y);
+          y += lineGap;
+        });
+      });
+    });
+  });
+
+  doc.save(`relatorio_${safeName}_${ts}.pdf`);
+}
+
+
 
 function renderBlock(container, obraId, blockId){
   const obra = state.obras[obraId];
@@ -975,12 +1158,6 @@ function renderApto(root){
         </div>
 
         <div class="hr"></div>
-        ${(apt.photos && apt.photos.length) ? `<div class="small"><b>Fotos do apartamento</b></div>
-        <div class="thumbs" id="aptThumbs">
-          ${apt.photos.map(ph=>`<img class="thumb" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
-        </div>
-        <div class="hr"></div>` : ``}
-
         <div id="pendList" class="grid"></div>
       </div>
 
@@ -998,7 +1175,6 @@ function renderApto(root){
   `;
 
   const aptThumbs = $("#aptThumbs");
-  if(aptThumbs){ $$("img.thumb", aptThumbs).forEach(img=> img.onclick = ()=> openPhotoViewer(img.getAttribute("src"))); }
 
   const btnAptFoto = $("#btnAddAptFoto");
   if(btnAptFoto){
@@ -1017,7 +1193,7 @@ function renderApto(root){
           saveState();
           toast("Foto do apto adicionada.");
           render();
-          openPhotoViewer(dataUrl);
+          toast('Fotos desativadas nesta versão.');
         }catch(e){ console.error(e); toast("Falha ao adicionar foto."); }
       };
       input.click();
@@ -1068,8 +1244,7 @@ function renderPendencias(container, obraId, blockId, apto){
             const canEditMine = (canCreate(u) && mine);
             const btns = [];
             if(canEditMine){
-              btns.push(`<button class="btn btn--ghost" data-act="edit" data-id="${p.id}">Editar</button>`);
-              btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
+                            btns.push(`<button class="btn btn--danger" data-act="del" data-id="${p.id}">Apagar</button>`);
             }
             return btns.join("");
           })()}
@@ -1081,43 +1256,29 @@ function renderPendencias(container, obraId, blockId, apto){
           <b>Histórico</b><br>
           ${(()=>{
             const lines = [];
-            // compat (campos antigos)
-            if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
-            if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
-            if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
-            if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
-            // eventos acumulados
             if(p.events && p.events.length){
               p.events.forEach(ev=>lines.push(fmtEvent(ev)));
+            }else{
+              if(p.createdAt) lines.push(`Criado: <b>${fmtDT(p.createdAt)}</b> por <b>${esc((p.createdBy && p.createdBy.name)||"-")}</b>`);
+              if(p.doneAt) lines.push(`Feito: <b>${fmtDT(p.doneAt)}</b> por <b>${esc((p.doneBy && p.doneBy.name)||"-")}</b>`);
+              if(p.reviewedAt) lines.push(`Conferência: <b>${fmtDT(p.reviewedAt)}</b> por <b>${esc((p.reviewedBy && p.reviewedBy.name)||"-")}</b>`);
+              if(p.reopenedAt) lines.push(`Reaberto: <b>${fmtDT(p.reopenedAt)}</b>`);
             }
-            // remove duplicados simples
             return lines.join("<br>");
           })()}
         </div>
-
-        ${(p.photos && p.photos.length) ? `<div class="hr" style="margin:10px 0"></div>
-          <div class="small"><b>Fotos</b></div>
-          <div class="thumbs">
-            ${p.photos.map(ph=>`<img class="thumb" data-ph="${esc(ph.id)}" data-pid="${esc(p.id)}" src="${esc(ph.dataUrl)}" alt="foto" />`).join("")}
-          </div>` : ``}
-
-
         <div class="row" style="gap:8px; flex-wrap:wrap; justify-content:flex-end">
           ${canDo ? `<button class="btn btn--orange" data-act="feito" data-id="${esc(p.id)}">Marcar FEITO</button>` : ``}
           ${canApprove ? `<button class="btn btn--green" data-act="aprovar" data-id="${esc(p.id)}">Aprovar</button>
                           <button class="btn btn--red" data-act="reprovar" data-id="${esc(p.id)}">Reprovar</button>` : ``}
           ${canReopenP ? `<button class="btn" data-act="reabrir" data-id="${esc(p.id)}">Reabrir</button>` : ``}
-          ${canCreate(u) ? `<button class="btn" data-act="foto" data-id="${esc(p.id)}">Adicionar foto</button>` : ``}
+          
         </div>
 
-        ${p.rejection?.note ? `<div class="small" style="margin-top:8px"><b>Reprovação:</b> ${esc(p.rejection.note)} <span class="small">(${fmtDT(p.rejection.at)} • ${esc((p.rejection.by && p.rejection.by.name) || "-")})</span></div>` : ``}
+        ${(p.state==='reprovado' && p.rejection?.note) ? `<div class="small" style="margin-top:8px"><b>Reprovação:</b> ${esc(p.rejection.note)} <span class="small">(${fmtDT(p.rejection.at)} • ${esc((p.rejection.by && p.rejection.by.name) || "-")})</span></div>` : ``}
       </div>
     `;
   }).join("");
-
-  $$("img.thumb", container).forEach(img=>{
-    img.onclick = ()=>{ openPhotoViewer(img.getAttribute("src")); };
-  });
 
   $$("button[data-act]", container).forEach(btn=>{
     btn.onclick = ()=>{
@@ -1127,18 +1288,7 @@ function renderPendencias(container, obraId, blockId, apto){
       if(act==="aprovar") return actAprovar(obraId, blockId, apto, id);
       if(act==="reprovar") return actReprovar(obraId, blockId, apto, id);
       if(act==="reabrir") return actReabrir(obraId, blockId, apto, id);
-      if(act==="foto") return actAddFotoPend(obraId, blockId, apto, id);
-      if(act==="edit") return actEditPend(obraId, blockId, apto, id);
       if(act==="del") return actDeletePend(obraId, blockId, apto, id);
-    };
-  });
-
-  $$("button.photoDel", container).forEach(btn=>{
-    btn.onclick = (e)=>{
-      e.stopPropagation();
-      const pid = btn.getAttribute("data-pend");
-      const phid = btn.getAttribute("data-phdel");
-      actDeletePhoto(obraId, blockId, apto, pid, phid);
     };
   });
 }
@@ -1169,9 +1319,13 @@ function actFeito(obraId, blockId, apto, pendId){
     render();
     return;
   }
-  p.state = "feito";
+  p.state = 'feito';
   p.doneAt = new Date().toISOString();
   p.doneBy = { id:u.id, name:u.name, role:u.role };
+  // se veio de reprovação, limpa conferência anterior e motivo para voltar ao fluxo
+  p.reviewedAt = null;
+  p.reviewedBy = null;
+  p.rejection = null;
   pushEvent(p, "feito", u);
   saveState();
   toast("Marcado como FEITO.");
@@ -1223,58 +1377,6 @@ function actReabrir(obraId, blockId, apto, pendId){
 }
 
 
-async function actAddFotoPend(obraId, blockId, apto, pendId){
-  const u = currentUser();
-  if(!canCreate(u)){ toast("Sem permissão."); return; }
-  // file picker
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "image/*";
-  input.capture = "environment";
-  input.onchange = async ()=>{
-    const file = input.files && input.files[0];
-    if(!file) return;
-    // basic size guard (~1.5MB)
-    if(file.size > 1_500_000){
-      toast("Foto muito pesada. Tente uma menor.");
-      return;
-    }
-    try{
-      const dataUrl = await readImageAsDataURL(file);
-      const { p } = findPend(obraId, blockId, apto, pendId);
-      if(!p) return;
-      p.photos = p.photos || [];
-      p.photos.push({ id: uid("ph"), dataUrl, addedAt: new Date().toISOString(), addedBy: { id:u.id, name:u.name, role:u.role } });
-      pushEvent(p, "foto_add", u);
-      saveState();
-      toast("Foto adicionada.");
-      render();
-      // open viewer for last photo
-      openPhotoViewer(dataUrl);
-    }catch(e){
-      console.error(e);
-      toast("Falha ao adicionar foto.");
-    }
-  };
-  input.click();
-function actEditPend(obraId, blockId, apto, pendId){
-  const u = currentUser();
-  if(!canCreate(u)){ toast("Sem permissão."); return; }
-  const { p } = findPend(obraId, blockId, apto, pendId);
-  if(!p) return;
-  if(!(p.createdBy && u && p.createdBy.id===u.id)){ toast("Você só pode editar o que você criou."); return; }
-  const title = prompt("Editar pendência:", p.title || "") || "";
-  if(!title.trim()) return;
-  const category = prompt("Categoria:", p.category || "") || "";
-  const location = prompt("Local:", p.location || "") || "";
-  p.title = title.trim();
-  p.category = category.trim();
-  p.location = location.trim();
-  pushEvent(p, "editado", u);
-  saveState();
-  toast("Atualizado.");
-  render();
-}
 
 function actDeletePend(obraId, blockId, apto, pendId){
   const u = currentUser();
@@ -1293,41 +1395,7 @@ function actDeletePend(obraId, blockId, apto, pendId){
   render();
 }
 
-function actDeletePhoto(obraId, blockId, apto, pendId, photoId){
-  const u = currentUser();
-  if(!canCreate(u)){ toast("Sem permissão."); return; }
-  const { p } = findPend(obraId, blockId, apto, pendId);
-  if(!p || !p.photos) return;
-  const ph = p.photos.find(x=>x.id===photoId);
-  if(!ph) return;
-  if(!(ph.addedBy && u && ph.addedBy.id===u.id)){ toast("Você só pode apagar a foto que você adicionou."); return; }
-  if(!confirm("Apagar esta foto?")) return;
-  p.photos = p.photos.filter(x=>x.id!==photoId);
-  pushEvent(p, "foto_del", u);
-  saveState();
-  toast("Foto apagada.");
-  render();
-}
 
-
-}
-
-function openPhotoViewer(src, meta){
-  const { backdrop, close } = openModal(`
-    <div class="modal">
-      <div class="row">
-        <div>
-          <div class="h2">Foto</div>
-          <div class="small">Toque fora para fechar</div>
-        </div>
-        <button class="btn btn--ghost" id="mClose">✕</button>
-      </div>
-      <div class="hr"></div>
-      <img src="${esc(dataUrl)}" alt="foto" style="width:100%; border-radius:14px; border:1px solid rgba(255,255,255,.12)" />
-    </div>
-  `);
-  $("#mClose", backdrop).onclick = close;
-}
 
 function openAddPendencia(obraId, blockId, apto){
   const u = currentUser();
@@ -1578,8 +1646,8 @@ function renderUsers(root){
       const typed = prompt("Para confirmar, digite DESATIVAR:") || "";
       if(typed.trim().toUpperCase()!=="DESATIVAR"){ toast("Cancelado."); return; }
       target.active = false;
-      if(state.session?.userId===id){
-        state.session = null;
+      if(getSessionUserId()===String(id).toLowerCase()){
+        setSessionUserId("");
       }
       saveState();
       toast("Usuário desativado.");
@@ -1696,6 +1764,60 @@ function renderSettings(root){
 
 
 
+
+function canDeletePend(p){
+  const u = currentUser();
+  if(!u) return false;
+  if(u.role === "supervisor") return true;
+  if(u.role === "qualidade") return true;
+  return (p && p.criadoPor && p.criadoPor.id === u.id);
+}
+
+function actDel(id){
+  try{
+    if(!view || view.type !== "apt") return;
+    const obra = getObraById(view.obraId);
+    const apt  = obra && findApt(obra, view.bloco, view.apto);
+    if(!apt || !apt.pendencias) return;
+    const p = apt.pendencias.find(x=>x.id===id);
+    if(!p) return;
+    if(!canDeletePend(p)){
+      toast("Sem permissão para apagar.");
+      return;
+    }
+    if(!confirm("Apagar esta pendência?")) return;
+    apt.pendencias = apt.pendencias.filter(x=>x.id!==id);
+    saveState();
+    render();
+    toast("Pendência apagada.");
+  }catch(e){
+    toast("Falha ao apagar.");
+  }
+}
+
+function actDelPhoto(pId, photoId){
+  try{
+    if(!view || view.type !== "apt") return;
+    const obra = getObraById(view.obraId);
+    const apt  = obra && findApt(obra, view.bloco, view.apto);
+    if(!apt || !apt.pendencias) return;
+    const p = apt.pendencias.find(x=>x.id===pId);
+    if(!p || !p.fotos) return;
+    if(!canDeletePend(p)){
+      toast("Sem permissão para apagar foto.");
+      return;
+    }
+    if(!confirm("Apagar esta foto?")) return;
+    p.fotos = p.fotos.filter(f=>f.id!==photoId);
+    saveState();
+    render();
+    toast("Foto apagada.");
+  }catch(e){
+    toast("Falha ao apagar foto.");
+  }
+}
+
+
 // V33: Delegação de cliques para botões (Editar/Apagar/Foto/Feito/Aprovar/Reprovar/Reabrir)
 document.addEventListener("click", function(e){
   const t = e.target;
@@ -1728,7 +1850,7 @@ document.addEventListener("click", function(e){
     const blockId = (typeof nav!=="undefined" && nav.params) ? nav.params.blockId : null;
     const apto = (typeof nav!=="undefined" && nav.params) ? nav.params.apto : null;
     if(!obraId || !blockId || !apto || !pid || !phid){
-      return openPhotoViewer(t.getAttribute("src"));
+      return toast('Fotos desativadas nesta versão.');
     }
     const u = currentUser();
     try{
@@ -1736,12 +1858,9 @@ document.addEventListener("click", function(e){
       const p = (apt.pendencias||[]).find(x=>x.id===pid);
       const photo = (p && p.photos ? p.photos.find(x=>x.id===phid) : null);
       const mine = !!(photo && u && photo.addedBy && photo.addedBy.id===u.id);
-      openPhotoViewer(photo ? photo.dataUrl : t.getAttribute("src"), {
-        canDelete: mine && (u.role==="qualidade" || u.role==="supervisor"),
-        onDelete: ()=> actDeletePhoto(obraId, blockId, apto, pid, phid)
-      });
+      toast('Fotos desativadas nesta versão.');
     }catch(err){
-      openPhotoViewer(t.getAttribute("src"));
+      toast('Fotos desativadas nesta versão.');
     }
   }
 });
