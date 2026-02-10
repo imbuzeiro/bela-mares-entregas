@@ -142,6 +142,146 @@ function saveState(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
+// ------------------------------
+// Firebase (compat) - Live Sync (Firestore)
+// Lê/escreve no MESMO lugar que já existe no seu Firestore:
+// apps / bela_mares_checklist  (campo "state")
+// ------------------------------
+const FB_ENABLED = (typeof firebase !== "undefined" && firebase.firestore);
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBZuzY9l0lbgD9rf79mQ_-tbUoLWPVmN08",
+  authDomain: "bela-mares-entregas.firebaseapp.com",
+  projectId: "bela-mares-entregas",
+  storageBucket: "bela-mares-entregas.firebasestorage.app",
+  messagingSenderId: "159475494264",
+  appId: "1:159475494264:web:953427de1a900f7aa3ac8d"
+};
+
+let fbDb = null;
+let fbDoc = null;
+let applyingRemote = false;
+let pendingRemoteSave = null;
+let remoteStateFormat = null; // 'object' | 'string'
+
+function getLocalSyncMs(){
+  // usa o carimbo do próprio state (se existir)
+  const t = state && state.last_obras_refresh ? Date.parse(state.last_obras_refresh) : 0;
+  return isFinite(t) ? t : 0;
+}
+
+function setLocalSyncNow(){
+  state.last_obras_refresh = new Date().toISOString();
+}
+
+function initFirebaseSync(){
+  if(!FB_ENABLED) return;
+  try{
+    if(!firebase.apps || !firebase.apps.length){
+      firebase.initializeApp(firebaseConfig);
+    }
+    fbDb = firebase.firestore();
+    fbDoc = fbDb.collection("apps").doc("bela_mares_checklist");
+
+    // Escuta mudanças do "ao vivo"
+    fbDoc.onSnapshot((snap)=>{
+      if(!snap.exists) return;
+      const data = snap.data() || {};
+      const rawState = data.state;
+      if(remoteStateFormat == null){
+        remoteStateFormat = (typeof rawState === "string") ? "string" : "object";
+      }
+
+      let remote = null;
+      try{
+        if(typeof rawState === "string"){
+          remote = JSON.parse(rawState || "null");
+        }else{
+          remote = rawState || null;
+        }
+      }catch(e){
+        console.warn("Falha ao ler state remoto:", e);
+        return;
+      }
+      if(!remote) return;
+
+      // timestamp do remoto (preferência: updatedAtMs / updatedAt / last_obras_refresh)
+      let remoteMs = 0;
+      if(typeof data.updatedAtMs === "number") remoteMs = data.updatedAtMs;
+      else if(data.updatedAt && typeof data.updatedAt.toMillis === "function") remoteMs = data.updatedAt.toMillis();
+      else if(remote.last_obras_refresh) remoteMs = Date.parse(remote.last_obras_refresh) || 0;
+      else if(data.last_obras_refresh) remoteMs = Date.parse(data.last_obras_refresh) || 0;
+
+      const localMs = getLocalSyncMs();
+
+      // só aplica se o remoto for mais novo OU se o local estiver vazio (primeiro load)
+      const localSeemsEmpty = !state || !state.obras || Object.keys(state.obras||{}).length===0;
+      if(remoteMs > localMs || localSeemsEmpty){
+        applyingRemote = true;
+        state = remote;
+        try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+        applyingRemote = false;
+        try{ render(); }catch(e){}
+      }
+    });
+
+    // Faz um "push" inicial se o Firestore estiver vazio
+    fbDoc.get().then(s=>{
+      if(!s.exists || !s.data() || !s.data().state){
+        queueRemoteSave(true);
+      }
+    }).catch(()=>{});
+
+  }catch(err){
+    console.warn("Firebase sync desativado:", err);
+  }
+}
+
+function queueRemoteSave(force){
+  if(!FB_ENABLED || !fbDoc) return;
+  if(applyingRemote && !force) return;
+
+  if(pendingRemoteSave) clearTimeout(pendingRemoteSave);
+  pendingRemoteSave = setTimeout(()=>{
+    try{
+      // atualiza carimbo antes de subir
+      setLocalSyncNow();
+
+      const payload = {
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAtMs: Date.now(),
+        last_obras_refresh: state.last_obras_refresh
+      };
+
+      if(remoteStateFormat === "string"){
+        payload.state = JSON.stringify(state);
+      }else{
+        payload.state = state;
+      }
+
+      fbDoc.set(payload, { merge: true });
+      try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+    }catch(e){
+      console.warn("Falha ao salvar no Firestore:", e);
+    }
+  }, 450); // debounce
+}
+
+// intercepta saveState para também salvar no Firestore
+const __saveStateOriginal = saveState;
+saveState = function(){
+  __saveStateOriginal();
+  // se veio de aplicação remota, não replica
+  if(!applyingRemote){
+    queueRemoteSave(false);
+  }
+};
+
+// inicia sync ao abrir
+try{ initFirebaseSync(); }catch(e){}
+
+
+
 
 function safeName(obj){
   return (obj && obj.name) ? obj.name : "-";
@@ -295,34 +435,6 @@ function aptStatus(apto){
   if(hasPend) return { label:"Com pendência", dot:"r" };
   if(hasAguard) return { label:"Aguardando conferência", dot:"o" };
   return { label:"Sem pendências", dot:"" };
-}
-
-function blockDots(block){
-  // Indicadores por bloco:
-  // - verde: existe apto concluído (Liberado)
-  // - laranja: existe apto aguardando conferência
-  // - vermelho: existe apto com pendência (pendente ou reprovado)
-  // Regras especiais:
-  // - Se TODOS os aptos concluídos => só verde
-  // - Se TODOS aguardando => só laranja
-  // - Se TODOS pendentes => só vermelho
-  const apts = Object.values(block.apartments || {});
-  if(apts.length===0) return "";
-  const dots = apts.map(a=>aptStatus(a).dot || "");
-  const all = (d)=>dots.every(x=>x===d);
-  if(all("g")) return `<span class="dot dot--g" title="Concluídos"></span>`;
-  if(all("o")) return `<span class="dot dot--o" title="Aguardando aprovação"></span>`;
-  if(all("r")) return `<span class="dot dot--r" title="Pendentes"></span>`;
-
-  const hasR = dots.includes("r");
-  const hasO = dots.includes("o");
-  const hasG = dots.includes("g");
-  const parts = [];
-  if(hasR) parts.push(`<span class="dot dot--r" title="Pendentes"></span>`);
-  if(hasO) parts.push(`<span class="dot dot--o" title="Aguardando aprovação"></span>`);
-  if(hasG) parts.push(`<span class="dot dot--g" title="Concluídos"></span>`);
-  if(parts.length===0) return "";
-  return `<span class="pillDots">${parts.join("")}</span>`;
 }
 
 function render(){
@@ -710,7 +822,7 @@ function renderObra(root){
       <div class="hr"></div>
       <div class="small">Escolha o bloco:</div>
       <div class="pills" id="blockPills">
-        ${blocks.map(b=>`<div class="pill" data-b="${b}">${b.replace("B","Bloco ")} ${blockDots(obra.blocks[b])}</div>`).join("")}
+        ${blocks.map(b=>`<div class="pill" data-b="${b}">${b.replace("B","Bloco ")}</div>`).join("")}
       </div>
     </div>
 
