@@ -184,7 +184,7 @@ function initFirestore(){
     fbUnsub = ref.onSnapshot((snap)=>{
       if(!snap.exists) return;
       const data = snap.data() || {};
-      const ts = (data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0);
+      const ts = (typeof data.updatedAtMs === "number" && data.updatedAtMs) ? data.updatedAtMs : ((data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0));
       if(!ts || ts <= lastRemoteTs) return;
       lastRemoteTs = ts;
 

@@ -3,8 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Evita que o navegador sirva uma versão antiga do index -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Bela Mares Incorporações — Checklist</title>
-  <link rel="stylesheet" href="styles.css?v=20260203e" />
+  <link id="mainCss" rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
@@ -33,6 +37,16 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
   <!-- App -->
-  <script src="app.js?v=20260203e"></script>
+  <script>
+  // Cache-buster automático para garantir que PC e celular carreguem a versão mais recente
+  (function(){
+    const v = Date.now();
+    const css = document.getElementById("mainCss");
+    if(css) css.href = "styles.css?v=" + v;
+    const s = document.createElement("script");
+    s.src = "app.js?v=" + v;
+    document.body.appendChild(s);
+  })();
+</script>
 </body>
 </html>
