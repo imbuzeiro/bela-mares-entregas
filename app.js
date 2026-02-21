@@ -204,7 +204,9 @@ function initFirestore(){
         state = parsed;
         if(!state._meta) state._meta = {};
         state._meta.updatedAt = ts;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+        // Persist the received remote state locally (so refreshes keep the latest)
+        // NOTE: pstate is only used in the save queue; here we must persist the current state.
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(persistableState()));
         // re-render current screen
         try{ render(); }catch(_){}
       }catch(e){}
