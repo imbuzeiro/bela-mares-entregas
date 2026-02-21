@@ -204,7 +204,7 @@ function initFirestore(){
         state = parsed;
         if(!state._meta) state._meta = {};
         state._meta.updatedAt = ts;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(pstate || persistableState()));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
         // re-render current screen
         try{ render(); }catch(_){}
       }catch(e){}
