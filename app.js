@@ -197,7 +197,7 @@ function initFirestore(){
 
         // only apply if remote is newer than local
         const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
-        if(ts <= localTs) return;
+        if(ts && localTs && ts === localTs) return;
 
         isApplyingRemote = true;
         if(parsed && parsed.session) delete parsed.session;
