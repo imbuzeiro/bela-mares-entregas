@@ -197,19 +197,17 @@ function initFirestore(){
 
         // only apply if remote is newer than local
         const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
-        if(ts && localTs && ts === localTs) return;
+        if(ts <= localTs) return;
 
         isApplyingRemote = true;
         if(parsed && parsed.session) delete parsed.session;
         state = parsed;
         if(!state._meta) state._meta = {};
         state._meta.updatedAt = ts;
-        // Persist the received remote state locally (so refreshes keep the latest)
-        // NOTE: pstate is only used in the save queue; here we must persist the current state.
         localStorage.setItem(STORAGE_KEY, JSON.stringify(persistableState()));
         // re-render current screen
-        try{ render(); }catch(_){}
-      }catch(e){}
+        try{ render(); }catch(e){ console.error("Render error:", e); }
+      }catch(e){ console.error("Erro ao aplicar estado remoto:", e); }
       finally{
         isApplyingRemote = false;
       }
@@ -239,7 +237,7 @@ function queueSaveToFirestore(pstate){
       // keep local meta in sync (ms is fine for comparison)
       if(!state._meta) state._meta = {};
       state._meta.updatedAt = now;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(pstate || persistableState()));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persistableState()));
     }catch(e){
       // ignore
     }
