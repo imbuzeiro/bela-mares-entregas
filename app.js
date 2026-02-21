@@ -6,6 +6,29 @@ const STATE_VERSION = 26;
 
 const STORAGE_KEY = "bm_checklist_classic_v1";
 
+// --- Safe persistence: avoid breaking the app when localStorage quota is exceeded ---
+function safeSetLocalStorage(key, obj){
+  try {
+    const str = JSON.stringify(obj);
+    // Most browsers give ~5MB for localStorage. Keep a safety margin.
+    if (str && str.length < 4_000_000) {
+      localStorage.setItem(key, str);
+    } else {
+      // If it grew too much, don't keep a gigantic cache that will crash sync.
+      // Firestore remains the source of truth.
+      localStorage.removeItem(key);
+    }
+  } catch (e) {
+    // Ignore quota / serialization errors. Never block sync/render.
+    try { localStorage.removeItem(key); } catch (_) {}
+  }
+}
+function safeGetLocalStorage(key){
+  try { return localStorage.getItem(key); } catch(e){ return null; }
+}
+// -------------------------------------------------------------------------------
+
+
 const SESSION_KEY = "bm_checklist_session_user";
 function getSessionUserId(){
   try{ return (localStorage.getItem(SESSION_KEY)||"").trim().toLowerCase(); }catch(e){ return ""; }
@@ -138,7 +161,7 @@ function seed(){
 function loadState(){
   // 1) localStorage (fast)  2) Firestore (if configured) will overwrite via listener
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = safeGetLocalStorage(STORAGE_KEY);
     if(!raw) return seed();
     const parsed = JSON.parse(raw);
     if(!parsed || !parsed.version) return seed();
@@ -204,10 +227,10 @@ function initFirestore(){
         state = parsed;
         if(!state._meta) state._meta = {};
         state._meta.updatedAt = ts;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(persistableState()));
+        safeSetLocalStorage(STORAGE_KEY, pstate || persistableState());
         // re-render current screen
-        try{ render(); }catch(e){ console.error("Render error:", e); }
-      }catch(e){ console.error("Erro ao aplicar estado remoto:", e); }
+        try{ render(); }catch(_){}
+      }catch(e){}
       finally{
         isApplyingRemote = false;
       }
@@ -237,7 +260,7 @@ function queueSaveToFirestore(pstate){
       // keep local meta in sync (ms is fine for comparison)
       if(!state._meta) state._meta = {};
       state._meta.updatedAt = now;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(persistableState()));
+      safeSetLocalStorage(STORAGE_KEY, pstate || persistableState());
     }catch(e){
       // ignore
     }
@@ -253,7 +276,7 @@ function persistableState(){
 
 function saveState(){
   const pstate = persistableState();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(pstate));
+  safeSetLocalStorage(STORAGE_KEY, pstate);
   // live sync (if enabled)
   try{ queueSaveToFirestore(pstate); }catch(_){ }
 }
