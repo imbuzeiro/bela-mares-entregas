@@ -5,28 +5,43 @@ const STATE_VERSION = 26;
 /* Sem Service Worker para evitar cache travado em testes. */
 
 const STORAGE_KEY = "bm_checklist_classic_v1";
+let localSaveDisabled = false;
 
-// --- Safe persistence: avoid breaking the app when localStorage quota is exceeded ---
-function safeSetLocalStorage(key, obj){
-  try {
-    const str = JSON.stringify(obj);
-    // Most browsers give ~5MB for localStorage. Keep a safety margin.
-    if (str && str.length < 4_000_000) {
-      localStorage.setItem(key, str);
-    } else {
-      // If it grew too much, don't keep a gigantic cache that will crash sync.
-      // Firestore remains the source of truth.
-      localStorage.removeItem(key);
-    }
-  } catch (e) {
-    // Ignore quota / serialization errors. Never block sync/render.
-    try { localStorage.removeItem(key); } catch (_) {}
+// Evita quebrar o app quando o LocalStorage estoura (fotos/estado grande).
+function safeSetItem(key, value){
+  if(localSaveDisabled) return;
+  try{
+    localStorage.setItem(key, value);
+  }catch(e){
+    console.warn("LocalStorage cheio (quota). Cache local desativado para evitar travar o app.", e);
+    localSaveDisabled = true;
+    try{ localStorage.removeItem(key); }catch(_){}
   }
 }
-function safeGetLocalStorage(key){
-  try { return localStorage.getItem(key); } catch(e){ return null; }
+
+// Remove dataUrl/base64 para não estourar quota do LocalStorage.
+// O dado "real" continua no Firestore (servidor).
+function stripLargeFields(obj){
+  if(!obj || typeof obj !== "object") return;
+  if(Array.isArray(obj)){
+    for(const it of obj) stripLargeFields(it);
+    return;
+  }
+  for(const k of Object.keys(obj)){
+    const v = obj[k];
+    if(k === "dataUrl" && typeof v === "string"){
+      obj[k] = null;
+      continue;
+    }
+    stripLargeFields(v);
+  }
 }
-// -------------------------------------------------------------------------------
+
+function persistableStateForLocal(){
+  const s = persistableState();
+  try{ stripLargeFields(s); }catch(_){}
+  return s;
+}
 
 
 const SESSION_KEY = "bm_checklist_session_user";
@@ -161,7 +176,7 @@ function seed(){
 function loadState(){
   // 1) localStorage (fast)  2) Firestore (if configured) will overwrite via listener
   try{
-    const raw = safeGetLocalStorage(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY);
     if(!raw) return seed();
     const parsed = JSON.parse(raw);
     if(!parsed || !parsed.version) return seed();
@@ -205,36 +220,48 @@ function initFirestore(){
     // subscribe
     if(fbUnsub) try{ fbUnsub(); }catch(_){}
     fbUnsub = ref.onSnapshot((snap)=>{
-      if(!snap.exists) return;
-      const data = snap.data() || {};
-      const ts = (typeof data.updatedAtMs === "number" && data.updatedAtMs) ? data.updatedAtMs : ((data.updatedAt && data.updatedAt.toMillis) ? data.updatedAt.toMillis() : (data.updatedAt || 0));
-      if(!ts || ts <= lastRemoteTs) return;
-      lastRemoteTs = ts;
+  if(!snap || !snap.exists) return;
 
-      const remoteState = data.state;
-      if(!remoteState) return;
+  // Ignora eco local (escrita pendente). A gente só aplica quando veio do servidor.
+  if(snap.metadata && snap.metadata.hasPendingWrites) return;
 
-      try{
-        const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
-        if(!parsed || parsed.version != STATE_VERSION) return;
+  const data = snap.data() || {};
+  const remoteState = data.state;
+  if(!remoteState) return;
 
-        // only apply if remote is newer than local
-        const localTs = state && state._meta && state._meta.updatedAt ? state._meta.updatedAt : 0;
-        if(ts <= localTs) return;
+  // Usa o horário do servidor (updateTime) pra não dar conflito por relógio diferente em cada aparelho.
+  const ts = (snap.updateTime && typeof snap.updateTime.toMillis === "function")
+    ? snap.updateTime.toMillis()
+    : Date.now();
 
-        isApplyingRemote = true;
-        if(parsed && parsed.session) delete parsed.session;
-        state = parsed;
-        if(!state._meta) state._meta = {};
-        state._meta.updatedAt = ts;
-        safeSetLocalStorage(STORAGE_KEY, pstate || persistableState());
-        // re-render current screen
-        try{ render(); }catch(_){}
-      }catch(e){}
-      finally{
-        isApplyingRemote = false;
-      }
-    });
+  if(ts <= lastRemoteTs) return;
+  lastRemoteTs = ts;
+
+  try{
+    const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
+    if(!parsed || parsed.version !== STATE_VERSION) return;
+
+    isApplyingRemote = true;
+
+    // Não sobrescreve sessão local (cada aparelho pode estar logado com usuário diferente)
+    const currentSession = (state && state.session) ? state.session : null;
+    if(parsed.session) delete parsed.session;
+
+    state = parsed;
+    if(currentSession) state.session = currentSession;
+
+    if(!state._meta) state._meta = {};
+    state._meta.updatedAt = ts;
+
+    safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
+
+    try{ render(); }catch(_){}
+  }catch(e){
+    console.warn("Erro ao aplicar estado remoto:", e);
+  }finally{
+    isApplyingRemote = false;
+  }
+});
   }catch(e){
     fbReady = false;
   }
@@ -260,7 +287,7 @@ function queueSaveToFirestore(pstate){
       // keep local meta in sync (ms is fine for comparison)
       if(!state._meta) state._meta = {};
       state._meta.updatedAt = now;
-      safeSetLocalStorage(STORAGE_KEY, pstate || persistableState());
+      safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
     }catch(e){
       // ignore
     }
@@ -276,7 +303,7 @@ function persistableState(){
 
 function saveState(){
   const pstate = persistableState();
-  safeSetLocalStorage(STORAGE_KEY, pstate);
+  safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
   // live sync (if enabled)
   try{ queueSaveToFirestore(pstate); }catch(_){ }
 }
