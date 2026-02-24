@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Evita que o navegador sirva uma versão antiga do index -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Bela Mares Incorporações — Checklist</title>
+  <link id="mainCss" rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand__name">Bela Mares Incorporações</div>
+      <div class="brand__sub">Checklist de obra</div>
+    </div>
+    <div class="topbar__right">
+      <button id="btnBack" class="btn btn--ghost" style="display:none">← Voltar</button>
+      <div id="userChip" class="chip" style="display:none"></div>
+      <button id="btnSettings" class="btn btn--ghost" style="display:none">⚙</button>
+      <button id="btnLogout" class="btn btn--ghost" style="display:none">Sair</button>
+    </div>
+  </header>
+
+  <main id="app" class="app"></main>
+
+  <div id="toast" class="toast" style="display:none"></div>
+
+  <!-- Firebase (compat) para funcionar com app.js sem build -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+
+  <!-- jsPDF (geração de PDF no navegador) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <!-- App -->
+  <script>
+  // Cache-buster automático para garantir que PC e celular carreguem a versão mais recente
+  (function(){
+    const v = Date.now();
+    const css = document.getElementById("mainCss");
+    if(css) css.href = "styles.css?v=" + v;
+    const s = document.createElement("script");
+    s.src = "app.js?v=" + v;
+    document.body.appendChild(s);
+  })();
+</script>
+</body>
+</html>
