@@ -208,6 +208,43 @@ let lastRemoteTs = 0;
 let isApplyingRemote = false;
 let saveTimer = null;
 
+function aptDocId(obraId, blockId, apto){
+  return String(obraId)+"__"+String(blockId)+"__"+String(apto);
+}
+
+function parseAptDocId(id){
+  const parts = String(id||"").split("__");
+  if(parts.length<3) return null;
+  return { obraId: parts[0], blockId: parts[1], apto: parts.slice(2).join("__") };
+}
+
+function ensureObraBlock(obraId, blockId){
+  if(!state.obras) state.obras = {};
+  if(!state.obras[obraId]) state.obras[obraId] = { id: obraId, name: obraId, blocks: {} };
+  const obra = state.obras[obraId];
+  if(!obra.blocks) obra.blocks = {};
+  if(!obra.blocks[blockId]) obra.blocks[blockId] = { id: blockId, apartments: {} };
+  const blk = obra.blocks[blockId];
+  if(!blk.apartments) blk.apartments = {};
+  return { obra, blk };
+}
+
+function applyRemoteApartment(docId, data){
+  const key = parseAptDocId(docId);
+  if(!key) return;
+  const { obraId, blockId, apto } = key;
+  ensureObraBlock(obraId, blockId);
+  const obra = state.obras[obraId];
+  const blk  = obra.blocks[blockId];
+  // Guard: ignore empty payloads
+  if(!data || typeof data !== "object") return;
+
+  // Merge only apt payload to keep UI stable
+  const prev = blk.apartments[apto] || {};
+  const next = Object.assign({}, prev, data);
+  blk.apartments[apto] = next;
+}
+
 function initFirestore(){
   try{
     if(!window.firebase || !window.firebase.initializeApp || !window.firebase.firestore) return;
@@ -215,102 +252,178 @@ function initFirestore(){
     fbDb  = window.firebase.firestore();
     fbReady = true;
 
-    const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+    const metaRef = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+    const aptCol  = fbDb.collection("apps").doc("bela_mares_checklist").collection("apartamentos");
 
-    // subscribe
+    // subscribe meta (users, obra names, settings) - pequeno
     if(fbUnsub) try{ fbUnsub(); }catch(_){}
-    fbUnsub = ref.onSnapshot((snap)=>{
-  if(!snap || !snap.exists) return;
+    fbUnsub = metaRef.onSnapshot((snap)=>{
+      if(!snap || !snap.exists) return;
+      if(snap.metadata && snap.metadata.hasPendingWrites) return;
 
-  // Ignora eco local (escrita pendente). A gente só aplica quando veio do servidor.
-  if(snap.metadata && snap.metadata.hasPendingWrites) return;
+      const data = snap.data() || {};
+      const remoteState = data.state;
+      if(!remoteState) return;
 
-  const data = snap.data() || {};
-  const remoteState = data.state;
-  if(!remoteState) return;
+      const ts =
+        (typeof data.updatedAtMs === "number" && isFinite(data.updatedAtMs)) ? data.updatedAtMs :
+        (data.updatedAt && typeof data.updatedAt.toMillis === "function") ? data.updatedAt.toMillis() :
+        null;
+      if(!ts) return;
+      if(ts <= lastRemoteTs) return;
+      lastRemoteTs = ts;
 
-  // Usa o updatedAtMs gravado no documento (estável entre cache/servidor).
-  // Se não existir, tenta usar updatedAt (serverTimestamp). Sem isso, não aplica snapshot (evita "piscar" e sobrescrever estado local).
-  const ts =
-    (typeof data.updatedAtMs === "number" && isFinite(data.updatedAtMs)) ? data.updatedAtMs :
-    (data.updatedAt && typeof data.updatedAt.toMillis === "function") ? data.updatedAt.toMillis() :
-    null;
+      try{
+        const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
+        if(!parsed || typeof parsed !== "object") return;
 
-  if(!ts) return;
+        isApplyingRemote = true;
+        // aplica apenas chaves de "meta" (sem apartments)
+        // mantém apartments locais (sincronizam via coleção)
+        const keepApts = (state && state.obras) ? JSON.parse(JSON.stringify(state.obras)) : null;
 
-  if(ts <= lastRemoteTs) return;
-  lastRemoteTs = ts;
+        // merge superficial
+        state = Object.assign({}, state, parsed);
 
-  try{
-    const parsed = (typeof remoteState === "string") ? JSON.parse(remoteState) : remoteState;
-    if(!parsed || parsed.version !== STATE_VERSION) return;
+        // restaura apartments se vierem vazias no meta
+        if(keepApts){
+          if(!state.obras) state.obras = {};
+          for(const oid of Object.keys(keepApts)){
+            if(!state.obras[oid]) state.obras[oid] = keepApts[oid];
+            if(!state.obras[oid].blocks) state.obras[oid].blocks = keepApts[oid].blocks || {};
+            for(const bid of Object.keys(keepApts[oid].blocks || {})){
+              const b = keepApts[oid].blocks[bid];
+              if(!state.obras[oid].blocks[bid]) state.obras[oid].blocks[bid] = b;
+              if(!state.obras[oid].blocks[bid].apartments) state.obras[oid].blocks[bid].apartments = b.apartments || {};
+            }
+          }
+        }
 
-    isApplyingRemote = true;
+        // salva local (meta)
+        safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
+        render();
+      }catch(e){
+        console.warn("Falha ao aplicar meta remoto:", e);
+      }finally{
+        isApplyingRemote = false;
+      }
+    });
 
-    // Não sobrescreve sessão local (cada aparelho pode estar logado com usuário diferente)
-    const currentSession = (state && state.session) ? state.session : null;
-    if(parsed.session) delete parsed.session;
+    // subscribe apartments (ao vivo)
+    if(window.fbAptUnsub) try{ window.fbAptUnsub(); }catch(_){}
+    window.fbAptUnsub = aptCol.onSnapshot((qs)=>{
+      if(!qs) return;
+      // aplica mudanças incrementais
+      qs.docChanges().forEach((ch)=>{
+        if(!ch || !ch.doc) return;
+        if(ch.doc.metadata && ch.doc.metadata.hasPendingWrites) return;
+        const data = ch.doc.data();
+        applyRemoteApartment(ch.doc.id, data);
+      });
+      render();
+    });
 
-    state = parsed;
-    if(currentSession) state.session = currentSession;
-
-    if(!state._meta) state._meta = {};
-    state._meta.updatedAt = ts;
-
-    safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
-
-    try{ render(); }catch(_){}
   }catch(e){
-    console.warn("Erro ao aplicar estado remoto:", e);
-  }finally{
-    isApplyingRemote = false;
-  }
-});
-  }catch(e){
-    fbReady = false;
+    console.warn("Firestore init failed:", e);
   }
 }
-
-initFirestore();
 
 function queueSaveToFirestore(pstate){
   if(!fbReady) return;
   if(saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async ()=>{
     try{
-      const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+      const metaRef = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
       const now = Date.now();
-      // don't upload while applying remote snapshot
       if(isApplyingRemote) return;
+
       const payload = {
         updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
         updatedAtMs: now,
         state: JSON.stringify(pstate || persistableState())
       };
-      await ref.set(payload, {merge:true});
-      // keep local meta in sync (ms is fine for comparison)
+      await metaRef.set(payload, {merge:true});
+
+      // keep local meta in sync
       if(!state._meta) state._meta = {};
       state._meta.updatedAt = now;
       safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
+
     }catch(e){
-      console.error("Firestore save failed:", e);
-      try{ toast("ERRO ao sincronizar (permissão/conexão). Abra F12 > Console."); }catch(_){}
+      console.error("Firestore meta save failed:", e);
+      try{ toast("ERRO ao sincronizar META (F12 > Console)"); }catch(_){}
     }
   }, 400);
 }
 
+function queueSaveApartment(obraId, blockId, apto){
+  if(!fbReady) return;
+  const obra = state?.obras?.[obraId];
+  const blk  = obra?.blocks?.[blockId];
+  const apt  = blk?.apartments?.[apto];
+  if(!apt) return;
+
+  // Debounce por apartamento (chave)
+  const key = aptDocId(obraId, blockId, apto);
+  if(!window.__aptSaveTimers) window.__aptSaveTimers = {};
+  if(window.__aptSaveTimers[key]) clearTimeout(window.__aptSaveTimers[key]);
+
+  window.__aptSaveTimers[key] = setTimeout(async ()=>{
+    try{
+      if(isApplyingRemote) return;
+      const ref = fbDb.collection("apps").doc("bela_mares_checklist").collection("apartamentos").doc(key);
+      const now = Date.now();
+
+      // Mantém documento leve: não salva session e não salva blobs gigantes no local.
+      const clean = JSON.parse(JSON.stringify(apt));
+      if(clean && clean.session) delete clean.session;
+
+      clean.updatedAt = window.firebase.firestore.FieldValue.serverTimestamp();
+      clean.updatedAtMs = now;
+      clean.obraId = obraId;
+      clean.blockId = blockId;
+      clean.apto = String(apto);
+
+      await ref.set(clean, {merge:true});
+    }catch(e){
+      console.error("Firestore apt save failed:", e);
+      try{ toast("ERRO ao sincronizar APTO (F12 > Console)"); }catch(_){}
+    }
+  }, 250);
+}
+
 function persistableState(){
-  // Never persist session globally; session is per-device (SESSION_KEY)
+  // Estado "meta": NÃO inclui apartments (eles vão em docs separados)
   const copy = JSON.parse(JSON.stringify(state));
   if(copy && copy.session) delete copy.session;
+
+  if(copy && copy.obras){
+    for(const oid of Object.keys(copy.obras)){
+      const obra = copy.obras[oid];
+      if(!obra || !obra.blocks) continue;
+      for(const bid of Object.keys(obra.blocks)){
+        const blk = obra.blocks[bid];
+        if(blk && blk.apartments) delete blk.apartments;
+      }
+    }
+  }
   return copy;
 }
 
 function saveState(){
   const pstate = persistableState();
   safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
-  // live sync (if enabled)
-  try{ queueSaveToFirestore(pstate); }catch(_){ }
+
+  // live sync meta
+  try{ queueSaveToFirestore(pstate); }catch(_){}
+
+  // live sync apartamento atual (por doc)
+  try{
+    if(nav && nav.screen==="apto" && nav.params){
+      const { obraId, blockId, apto } = nav.params;
+      if(obraId && blockId && apto!=null) queueSaveApartment(obraId, blockId, apto);
+    }
+  }catch(_){}
 }
 
 function safeName(obj){
@@ -1179,8 +1292,15 @@ function renderApto(root){
   const { obraId, blockId, apto } = nav.params;
   const obra = state.obras[obraId];
   const block = obra?.blocks?.[blockId];
-  const apt = block?.apartments?.[apto];
-  if(!apt){ toast("Apartamento não encontrado"); return goto("obra",{ obraId }); }
+  let apt = block?.apartments?.[apto];
+  if(!apt){
+    // Se ainda não carregou do Firestore, cria placeholder (o snapshot vai preencher se existir)
+    ensureObraBlock(obraId, blockId);
+    const obra2 = state.obras[obraId];
+    const block2 = obra2.blocks[blockId];
+    block2.apartments[apto] = block2.apartments[apto] || { pendencias: [], photos: [], events: [] };
+    apt = block2.apartments[apto];
+  }
 
   // execução só pode na obra vinculada
   if(u.role==="execucao" && !(u.obraIds||[]).includes(obraId)){
