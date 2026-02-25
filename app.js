@@ -279,11 +279,39 @@ function initFirestore(){
 
         isApplyingRemote = true;
         // aplica apenas chaves de "meta" (sem apartments)
+        // Se vier um "legado" (apartments dentro do state), aplica para não perder visão/contagens.
+        // Em seguida migra para docs por apartamento para voltar o "ao vivo" sem estourar 1MiB.
         // mantém apartments locais (sincronizam via coleção)
         const keepApts = (state && state.obras) ? JSON.parse(JSON.stringify(state.obras)) : null;
 
         // merge superficial
         state = Object.assign({}, state, parsed);
+
+        // Se o remoto trouxe apartments (legado), usa-os como base local (para não "sumir" Park Rubi etc).
+        // Nota: persistableState() NÃO salva apartments no meta, então isso não volta a estourar o doc.
+        try{
+          if(parsed && parsed.obras){
+            for(const oid of Object.keys(parsed.obras || {})){
+              const ob = parsed.obras[oid];
+              if(!ob || !ob.blocks) continue;
+              for(const bid of Object.keys(ob.blocks || {})){
+                const blk = ob.blocks[bid];
+                if(blk && blk.apartments){
+                  if(!state.obras) state.obras = {};
+                  if(!state.obras[oid]) state.obras[oid] = JSON.parse(JSON.stringify(ob));
+                  if(!state.obras[oid].blocks) state.obras[oid].blocks = {};
+                  if(!state.obras[oid].blocks[bid]) state.obras[oid].blocks[bid] = JSON.parse(JSON.stringify(blk));
+                  state.obras[oid].blocks[bid].apartments = JSON.parse(JSON.stringify(blk.apartments));
+                }
+              }
+            }
+          }
+        }catch(_){}
+
+        // Dispara migração (uma vez por sessão) se detectar legado com apartments preenchidos.
+        try{
+          migrateLegacyToApartmentDocsIfNeeded(parsed);
+        }catch(_){}
 
         // restaura apartments se vierem vazias no meta
         if(keepApts){
@@ -409,6 +437,120 @@ function persistableState(){
   }
   return copy;
 }
+
+// --- Migração LEGACY (tudo no state/main) -> docs por apartamento ---
+// Motivo: Firestore tem limite ~1MiB por documento; quando estoura, o "ao vivo" para.
+// Esta migração copia apenas apartamentos que tenham dados (pendências/fotos) para:
+// apps/bela_mares_checklist/apartamentos/{obraId}__{blocoId}__{aptoNum}
+//
+// Importante: NÃO apaga o legado automaticamente.
+let legacyMigratedThisSession = false;
+
+function makeAptoDocId(obraId, blockId, aptNum){
+  return `${obraId}__${blockId}__${String(aptNum)}`;
+}
+
+function legacyHasApartmentData(legacy){
+  try{
+    const obras = legacy?.obras || {};
+    for(const oid of Object.keys(obras)){
+      const blocks = obras[oid]?.blocks || {};
+      for(const bid of Object.keys(blocks)){
+        const apts = blocks[bid]?.apartments || {};
+        for(const num of Object.keys(apts)){
+          const a = apts[num];
+          const hasP = Array.isArray(a?.pendencias) && a.pendencias.length;
+          const hasF = Array.isArray(a?.photos) && a.photos.length;
+          if(hasP || hasF) return true;
+        }
+      }
+    }
+  }catch(_){}
+  return false;
+}
+
+async function migrateLegacyToApartmentDocsIfNeeded(legacyState){
+  if(!fbReady) return false;
+  if(legacyMigratedThisSession) return false;
+
+  // Só migra se tiver apartments com dados no legado
+  if(!legacyHasApartmentData(legacyState)) return false;
+
+  legacyMigratedThisSession = true;
+
+  const aptCol = fbDb.collection("apps").doc("bela_mares_checklist").collection("apartamentos");
+  const now = Date.now();
+
+  try{
+    // Migra somente apartamentos com pendências/fotos (para reduzir writes).
+    let batch = fbDb.batch();
+    let ops = 0;
+    let total = 0;
+
+    const obras = legacyState?.obras || {};
+    for(const obraId of Object.keys(obras)){
+      const obra = obras[obraId];
+      const obraName = obra?.name || obra?.title || obraId;
+      const blocks = obra?.blocks || {};
+      for(const blockId of Object.keys(blocks)){
+        const blk = blocks[blockId];
+        const apartments = blk?.apartments || {};
+        for(const aptNum of Object.keys(apartments)){
+          const apt = apartments[aptNum] || {};
+          const pend = Array.isArray(apt.pendencias) ? apt.pendencias : [];
+          const photos = Array.isArray(apt.photos) ? apt.photos : [];
+          if(!pend.length && !photos.length) continue;
+
+          const docId = makeAptoDocId(obraId, blockId, aptNum);
+          const ref = aptCol.doc(docId);
+
+          const payload = {
+            obraId, obraName,
+            blockId,
+            apto: String(aptNum),
+            pendencias: pend,
+            photos: photos,
+            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+            updatedAtMs: now
+          };
+
+          batch.set(ref, payload, {merge:true});
+          ops += 1;
+          total += 1;
+
+          // Firestore batch limita ~500 ops. Usa margem de segurança.
+          if(ops >= 450){
+            await batch.commit();
+            batch = fbDb.batch();
+            ops = 0;
+          }
+        }
+      }
+    }
+
+    if(ops) await batch.commit();
+
+    // Marca no meta que já migrou (somente meta, sem apartments).
+    try{
+      const metaRef = fbDb.collection("apps").doc("bela_mares_checklist").collection("state").doc("main");
+      await metaRef.set({
+        migratedToApartments: true,
+        migratedAtMs: now,
+        updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAtMs: now
+      }, {merge:true});
+    }catch(_){}
+
+    try{ toast(`Migração concluída (${total} apartamentos).`); }catch(_){}
+    return true;
+
+  }catch(e){
+    console.error("Falha na migração para docs por apartamento:", e);
+    try{ toast("Falha na migração. Veja Console (F12)."); }catch(_){}
+    return false;
+  }
+}
+
 
 function saveState(){
   const pstate = persistableState();
