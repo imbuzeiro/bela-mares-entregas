@@ -230,9 +230,13 @@ function initFirestore(){
   if(!remoteState) return;
 
   // Usa o horário do servidor (updateTime) pra não dar conflito por relógio diferente em cada aparelho.
-  const ts = (snap.updateTime && typeof snap.updateTime.toMillis === "function")
-    ? snap.updateTime.toMillis()
-    : Date.now();
+  const ts =
+  (typeof data.updatedAtMs === "number" && isFinite(data.updatedAtMs)) ? data.updatedAtMs :
+  (data.updatedAt && typeof data.updatedAt.toMillis === "function") ? data.updatedAt.toMillis() :
+  (snap.updateTime && typeof snap.updateTime.toMillis === "function") ? snap.updateTime.toMillis() :
+  null;
+
+if(!ts) return;
 
   if(ts <= lastRemoteTs) return;
   lastRemoteTs = ts;
@@ -289,8 +293,9 @@ function queueSaveToFirestore(pstate){
       state._meta.updatedAt = now;
       safeSetItem(STORAGE_KEY, JSON.stringify(persistableStateForLocal()));
     }catch(e){
-      // ignore
-    }
+  console.error("Firestore save failed:", e);
+  try{ toast("Erro ao sincronizar com servidor. Abra o Console (F12)."); }catch(_){}
+}
   }, 400);
 }
 
